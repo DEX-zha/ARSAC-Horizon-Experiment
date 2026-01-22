@@ -15,11 +15,13 @@ import matplotlib.pyplot as plt
 from src.horizon_utils import (
     build_supervised,
     estimate_lyapunov,
+    estimate_expansion_quantile,
     generate_logistic_map,
     generate_lorenz,
     generate_mackey_glass,
     generate_rossler,
     horizon_from_model_bound,
+    horizon_from_model_bound_by_growth,
     set_seed,
     split_series,
     standardize_series,
@@ -355,7 +357,7 @@ def evaluate_mse(model, x, y, device="cpu"):
 def estimate_model_error(
     model, series_std, dim, lag, mode="quantile", quantile=0.95, scale=3.0
 ):
-    """Estimates a model error bound from one-step residuals."""
+    """Estimates a probabilistic model error bound from one-step residuals."""
     try:
         x_calib, y_calib = build_supervised(series_std, dim, lag, horizon=1)
     except ValueError:
@@ -766,48 +768,82 @@ def run_experiment(args):
         quantile=args.delta_quantile,
         scale=args.delta_scale,
     )
-    horizon_model_steps = horizon_from_model_bound(
-        lyap_step, base_err, model_error, tolerance
+    exp_dim = args.expansion_dim if args.expansion_dim is not None else lyap_dim
+    exp_lag = args.expansion_lag if args.expansion_lag is not None else lyap_lag
+    exp_series = np.concatenate([train_std, val_std], axis=0)
+    expansion_q, _ = estimate_expansion_quantile(
+        exp_series,
+        dim=exp_dim,
+        lag=exp_lag,
+        quantile=args.expansion_quantile,
+        theiler=args.expansion_theiler,
+        max_pairs=args.expansion_samples,
+        seed=args.seed,
+    )
+    horizon_model_steps = horizon_from_model_bound_by_growth(
+        expansion_q, base_err, model_error, tolerance
     )
     horizon_model_time = (
         horizon_model_steps * dt if math.isfinite(horizon_model_steps) else float("inf")
     )
 
     os.makedirs(args.output_dir, exist_ok=True)
-    csv_path = os.path.join(args.output_dir, "horizon_results.csv")
+    csv_name = "horizon_results.csv"
+    csv_path = os.path.join(args.output_dir, csv_name)
+    header = [
+        "dataset",
+        "model",
+        "dim",
+        "lag",
+        "val_mse",
+        "selection_metric",
+        "selection_horizon",
+        "test_mse",
+        "lyapunov_step",
+        "lyapunov_time",
+        "lyapunov_dim",
+        "lyapunov_lag",
+        "horizon_real",
+        "horizon_real_time",
+        "horizon_theory",
+        "horizon_theory_time",
+        "error_mode",
+        "error_factor",
+        "error_tolerance",
+        "error_tolerance_used",
+        "calib_ratio",
+        "model_error",
+        "model_error_mode",
+        "horizon_model",
+        "horizon_model_time",
+        "expansion_quantile",
+        "expansion_samples",
+        "expansion_theiler",
+        "expansion_dim",
+        "expansion_lag",
+        "expansion_Lq",
+        "bound_mode",
+    ]
+
+    if os.path.exists(csv_path):
+        with open(csv_path, "r", newline="") as f:
+            reader = csv.reader(f)
+            existing_header = next(reader, [])
+        if existing_header != header:
+            base, ext = os.path.splitext(csv_name)
+            suffix = 2
+            while True:
+                alt_name = f"{base}_v{suffix}{ext}"
+                alt_path = os.path.join(args.output_dir, alt_name)
+                if not os.path.exists(alt_path):
+                    csv_path = alt_path
+                    break
+                suffix += 1
     write_header = not os.path.exists(csv_path)
     with open(csv_path, "a", newline="") as f:
         writer = csv.writer(f)
         if write_header:
-            writer.writerow(
-                [
-                    "dataset",
-                    "model",
-                    "dim",
-                    "lag",
-                    "val_mse",
-                    "selection_metric",
-                    "selection_horizon",
-                    "test_mse",
-                    "lyapunov_step",
-                    "lyapunov_time",
-                    "lyapunov_dim",
-                    "lyapunov_lag",
-                    "horizon_real",
-                    "horizon_real_time",
-                    "horizon_theory",
-                    "horizon_theory_time",
-                    "error_mode",
-                    "error_factor",
-                    "error_tolerance",
-                    "error_tolerance_used",
-                    "calib_ratio",
-                    "model_error",
-                    "model_error_mode",
-                    "horizon_model",
-                    "horizon_model_time",
-                ]
-            )
+            writer.writerow(header)
         writer.writerow(
             [
                 args.dataset,
@@ -845,6 +881,13 @@ def run_experiment(args):
                 f"{horizon_model_time:.3f}"
                 if math.isfinite(horizon_model_time)
                 else "inf",
+                f"{args.expansion_quantile:.3f}",
+                args.expansion_samples,
+                args.expansion_theiler,
+                exp_dim,
+                exp_lag,
+                f"{expansion_q:.6f}",
+                "probabilistic",
             ]
         )
 
@@ -867,7 +910,8 @@ def run_experiment(args):
         f"horizon_real={horizon_real} horizon_real_time={horizon_real_time:.2f} "
         f"horizon_theory={horizon_theory_steps:.2f} horizon_theory_time={horizon_theory_time:.2f} "
         f"horizon_model={horizon_model_steps:.2f} horizon_model_time={horizon_model_time:.2f} "
-        f"delta={model_error:.4f} tol={tolerance:.6f}{selection_note} elapsed={elapsed:.1f}s"
+        f"delta={model_error:.4f} Lq={expansion_q:.4f} tol={tolerance:.6f}"
+        f"{selection_note} elapsed={elapsed:.1f}s"
     )
     return {
         "dim": best["dim"],
@@ -887,6 +931,13 @@ def run_experiment(args):
         "model_error": model_error,
         "model_error_mode": model_error_mode,
         "calib_ratio": args.calib_ratio,
+        "expansion_quantile": args.expansion_quantile,
+        "expansion_samples": args.expansion_samples,
+        "expansion_theiler": args.expansion_theiler,
+        "expansion_dim": exp_dim,
+        "expansion_lag": exp_lag,
+        "expansion_Lq": expansion_q,
+        "bound_mode": "probabilistic",
         "error_tolerance_used": tolerance,
         "selection_metric": args.selection_metric,
         "selection_horizon": best["selection"]["horizon"]
@@ -960,6 +1011,11 @@ def build_parser(add_help=True):
     )
     parser.add_argument("--delta-quantile", type=float, default=0.95)
     parser.add_argument("--delta-scale", type=float, default=3.0)
+    parser.add_argument("--expansion-quantile", type=float, default=0.95)
+    parser.add_argument("--expansion-samples", type=int, default=500)
+    parser.add_argument("--expansion-theiler", type=int, default=10)
+    parser.add_argument("--expansion-dim", type=int, default=None)
+    parser.add_argument("--expansion-lag", type=int, default=None)
 
     parser.add_argument("--lyap-max-t", type=int, default=25)
     parser.add_argument("--lyap-theiler", type=int, default=10)

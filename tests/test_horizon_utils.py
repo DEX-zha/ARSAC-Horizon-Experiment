@@ -11,6 +11,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from src.horizon_utils import (
     build_supervised,
     embed_series,
+    estimate_expansion_quantile,
     estimate_lyapunov,
     generate_logistic_map,
     horizon_from_model_bound,
@@ -74,6 +75,14 @@ class TestHorizonUtils(unittest.TestCase):
         h_low = horizon_from_model_bound(0.1, init_err=0.01, delta=0.0, tolerance=0.1)
         h_high = horizon_from_model_bound(0.1, init_err=0.01, delta=0.05, tolerance=0.1)
         self.assertLessEqual(h_high, h_low)
+
+    def test_expansion_quantile(self):
+        series = generate_logistic_map(800, r=4.0, x0=0.2, warmup=100)
+        lq, ratios = estimate_expansion_quantile(
+            series, dim=3, lag=1, quantile=0.9, theiler=5, max_pairs=100, seed=0
+        )
+        self.assertTrue(lq > 0.0)
+        self.assertTrue(ratios.size >= 0)
 
 
 if __name__ == "__main__":

@@ -128,10 +128,10 @@ def split_series(series, train_ratio=0.7, val_ratio=0.15, calib_ratio=0.0):
     return train, val, calib, test
 
 
-def horizon_from_model_bound(lyap_step, init_err, delta, tolerance):
+def horizon_from_model_bound_by_growth(growth, init_err, delta, tolerance):
     """Estimates horizon from a model-aware error bound.
 
-    Uses e_{t+1} <= L * e_t + delta with L = exp(lyap_step).
+    Uses e_{t+1} <= L * e_t + delta with L = growth (scalar > 0).
     """
     if tolerance <= 0:
         return 0.0
@@ -140,13 +140,9 @@ def horizon_from_model_bound(lyap_step, init_err, delta, tolerance):
     if init_err >= tolerance:
         return 0.0
 
-    if lyap_step <= 0.0:
-        if delta <= 0.0:
-            return float("inf")
-        return math.ceil((tolerance - init_err) / delta)
-
-    growth = math.exp(lyap_step)
-    if abs(growth - 1.0) < 1e-12:
+    if growth <= 0.0:
+        return 0.0
+    if growth <= 1.0 + 1e-12:
         if delta <= 0.0:
             return float("inf")
         return math.ceil((tolerance - init_err) / delta)
@@ -159,6 +155,63 @@ def horizon_from_model_bound(lyap_step, init_err, delta, tolerance):
     if ratio <= 1.0:
         return 0.0
     return math.ceil(math.log(ratio) / math.log(growth))
+
+
+def horizon_from_model_bound(lyap_step, init_err, delta, tolerance):
+    """Backward-compatible wrapper using lyap_step as log-growth."""
+    growth = math.exp(lyap_step)
+    return horizon_from_model_bound_by_growth(growth, init_err, delta, tolerance)
+
+
+def estimate_expansion_quantile(
+    series,
+    dim,
+    lag,
+    quantile=0.95,
+    theiler=10,
+    max_pairs=500,
+    seed=0,
+):
+    """Estimates a quantile of local expansion factors in embedded space."""
+    series = np.asarray(series, dtype=np.float64)
+    embedded = embed_series(series, dim, lag)
+    n = embedded.shape[0]
+    if n < 3:
+        return 1.0, np.array([], dtype=np.float64)
+
+    rng = np.random.default_rng(seed)
+    max_index = n - 2
+    indices = np.arange(max_index, dtype=np.int64)
+    if max_pairs is None or max_pairs >= len(indices):
+        sample = indices
+    else:
+        sample = rng.choice(indices, size=max_pairs, replace=False)
+
+    ratios = []
+    for i in sample:
+        diff = embedded - embedded[i]
+        dist = np.linalg.norm(diff, axis=1)
+        lo = max(0, i - theiler)
+        hi = min(n, i + theiler + 1)
+        dist[lo:hi] = np.inf
+        j = int(np.argmin(dist))
+        d0 = dist[j]
+        if not np.isfinite(d0) or d0 <= 1e-12:
+            continue
+        if i + 1 >= n or j + 1 >= n:
+            continue
+        d1 = np.linalg.norm(embedded[i + 1] - embedded[j + 1])
+        if d1 <= 1e-12:
+            continue
+        ratios.append(d1 / d0)
+
+    if not ratios:
+        return 1.0, np.array([], dtype=np.float64)
+
+    ratios = np.asarray(ratios, dtype=np.float64)
+    q = float(np.quantile(ratios, quantile))
+    q = max(q, 1e-6)
+    return q, ratios
 
 
 def embed_series(series, dim, lag):

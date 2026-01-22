@@ -78,6 +78,7 @@ def summarize_results(results):
             [r.get("horizon_model_time") for r in results]
         ),
         "model_error": median_value([r.get("model_error") for r in results]),
+        "expansion_Lq": median_value([r.get("expansion_Lq") for r in results]),
         "error_tolerance_used": median_value(
             [r.get("error_tolerance_used") for r in results]
         ),
@@ -104,6 +105,7 @@ def write_markdown_table(rows, output_path, selection_metric, error_mode):
         "h_theory_time_med",
         "h_model_time_med",
         "delta_med",
+        "Lq_med",
         "selection_metric",
         "error_mode",
         "error_tol_used_med",
@@ -130,6 +132,7 @@ def write_markdown_table(rows, output_path, selection_metric, error_mode):
             format_value(row.get("horizon_theory_time")),
             format_value(row.get("horizon_model_time")),
             format_value(row.get("model_error")),
+            format_value(row.get("expansion_Lq")),
             selection_metric,
             error_mode,
             format_value(row.get("error_tolerance_used")),
@@ -146,10 +149,10 @@ def write_latex_table(rows, output_path, selection_metric, error_mode):
     lines.append(r"\begin{table}[ht]")
     lines.append(r"\centering")
     lines.append(r"\resizebox{\textwidth}{!}{")
-    lines.append(r"\begin{tabular}{l l r r r r r r r r r r}")
+    lines.append(r"\begin{tabular}{l l r r r r r r r r r r r}")
     lines.append(r"\hline")
     lines.append(
-        r"Dataset & Model & Seeds & dim & lag & valMSE & testMSE & $H_{real}$ & $H_{theory}$ & $H_{model}$ & $\lambda$ & $\delta$ \\"
+        r"Dataset & Model & Seeds & dim & lag & valMSE & testMSE & $H_{real}$ & $H_{theory}$ & $H_{model}$ & $\lambda$ & $\delta$ & $L_q$ \\"
     )
     lines.append(r"\hline")
     for row in rows:
@@ -166,6 +169,7 @@ def write_latex_table(rows, output_path, selection_metric, error_mode):
             format_value(row.get("horizon_model"), decimals=2),
             format_value(row.get("lyapunov_step"), decimals=4),
             format_value(row.get("model_error"), decimals=4),
+            format_value(row.get("expansion_Lq"), decimals=4),
         ]
         lines.append(" & ".join(values) + r" \\")
     lines.append(r"\hline")
@@ -273,6 +277,8 @@ def main():
                     "model_error": result.get("model_error"),
                     "model_error_mode": result.get("model_error_mode"),
                     "calib_ratio": result.get("calib_ratio"),
+                    "expansion_Lq": result.get("expansion_Lq"),
+                    "bound_mode": result.get("bound_mode"),
                     "error_tolerance_used": result.get("error_tolerance_used"),
                     "selection_metric": result.get("selection_metric"),
                     "selection_horizon": result.get("selection_horizon"),
@@ -300,6 +306,8 @@ def main():
                         format_value(record["model_error"]),
                         record["model_error_mode"],
                         format_value(record.get("calib_ratio")),
+                        format_value(record.get("expansion_Lq")),
+                        record.get("bound_mode"),
                         args.selection_metric,
                         record.get("selection_horizon", ""),
                         args.error_mode,
@@ -347,6 +355,8 @@ def main():
         "model_error",
         "model_error_mode",
         "calib_ratio",
+        "expansion_Lq",
+        "bound_mode",
         "selection_metric",
         "selection_horizon",
         "error_mode",
@@ -372,6 +382,7 @@ def main():
         "horizon_theory_time_med",
         "horizon_model_time_med",
         "delta_med",
+        "Lq_med",
         "error_tol_used_med",
     ]
     summary_csv_rows = []
@@ -395,6 +406,7 @@ def main():
                 format_value(row.get("horizon_theory_time")),
                 format_value(row.get("horizon_model_time")),
                 format_value(row.get("model_error")),
+                format_value(row.get("expansion_Lq")),
                 format_value(row.get("error_tolerance_used")),
             ]
         )

@@ -13,6 +13,41 @@ from src.horizon_experiment import build_parser, run_experiment
 def parse_row(row):
     """Parses a CSV row into a normalized dictionary."""
     n = len(row)
+    if n == 32:
+        return {
+            "dataset": row[0],
+            "model": row[1],
+            "dim": row[2],
+            "lag": row[3],
+            "val_mse": row[4],
+            "selection_metric": row[5],
+            "selection_horizon": row[6],
+            "test_mse": row[7],
+            "lyapunov_step": row[8],
+            "lyapunov_time": row[9],
+            "lyapunov_dim": row[10],
+            "lyapunov_lag": row[11],
+            "horizon_real": row[12],
+            "horizon_real_time": row[13],
+            "horizon_theory": row[14],
+            "horizon_theory_time": row[15],
+            "error_mode": row[16],
+            "error_factor": row[17],
+            "error_tolerance": row[18],
+            "error_tolerance_used": row[19],
+            "calib_ratio": row[20],
+            "model_error": row[21],
+            "model_error_mode": row[22],
+            "horizon_model": row[23],
+            "horizon_model_time": row[24],
+            "expansion_quantile": row[25],
+            "expansion_samples": row[26],
+            "expansion_theiler": row[27],
+            "expansion_dim": row[28],
+            "expansion_lag": row[29],
+            "expansion_Lq": row[30],
+            "bound_mode": row[31],
+        }
     if n == 25:
         return {
             "dataset": row[0],
@@ -149,6 +184,8 @@ def format_row(row):
         row.get("horizon_model_time", ""),
         row.get("model_error", ""),
         row.get("model_error_mode", ""),
+        row.get("expansion_Lq", ""),
+        row.get("bound_mode", ""),
         row.get("selection_metric", ""),
         row.get("selection_horizon", ""),
         row.get("error_mode", ""),
@@ -187,6 +224,8 @@ def format_result_row(result, dataset, model, args):
         fmt(result.get("horizon_model_time")),
         fmt(result.get("model_error")),
         result.get("model_error_mode", ""),
+        fmt(result.get("expansion_Lq")),
+        result.get("bound_mode", ""),
         result.get("selection_metric", ""),
         fmt(result.get("selection_horizon")),
         args.error_mode,
@@ -240,6 +279,7 @@ def format_median_row(result, model, seed_count, args):
         fmt(result.get("horizon_theory_time")),
         fmt(result.get("horizon_model_time")),
         fmt(result.get("model_error")),
+        fmt(result.get("expansion_Lq")),
         args.selection_metric,
         args.error_mode,
         fmt(result.get("error_tolerance_used")),
@@ -310,6 +350,8 @@ def main():
                 "model_error": result.get("model_error"),
                 "model_error_mode": result.get("model_error_mode"),
                 "calib_ratio": result.get("calib_ratio"),
+                "expansion_Lq": result.get("expansion_Lq"),
+                "bound_mode": result.get("bound_mode"),
                 "error_mode": args.error_mode,
                 "error_tolerance_used": result.get("error_tolerance_used"),
             }
@@ -351,6 +393,7 @@ def main():
                     [r.get("horizon_model_time") for r in results]
                 ),
                 "model_error": median_value([r.get("model_error") for r in results]),
+                "expansion_Lq": median_value([r.get("expansion_Lq") for r in results]),
                 "error_tolerance_used": median_value(
                     [r.get("error_tolerance_used") for r in results]
                 ),
@@ -374,6 +417,7 @@ def main():
             "horizon_theory_time_med",
             "horizon_model_time_med",
             "model_error_med",
+            "expansion_Lq_med",
             "selection_metric",
             "error_mode",
             "error_tol_used_med",
@@ -396,6 +440,8 @@ def main():
             "horizon_model_time",
             "model_error",
             "model_error_mode",
+            "expansion_Lq",
+            "bound_mode",
             "selection_metric",
             "selection_horizon",
             "error_mode",

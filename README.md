@@ -36,11 +36,12 @@ Rigorous benchmark (long):
 
 You can disable the progress bar with `--no-progress`.
 
-Model-aware bound options (calibration and delta mode):
+Probabilistic model-aware bound options (calibration + quantiles):
 
 ```
 ./venv/bin/python -m src.horizon_experiment \
-  --calib-ratio 0.05 --delta-mode quantile --delta-quantile 0.95
+  --calib-ratio 0.05 --delta-mode quantile --delta-quantile 0.95 \
+  --expansion-quantile 0.95 --expansion-samples 500
 ```
 
 ## Outputs
