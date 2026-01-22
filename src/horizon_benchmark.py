@@ -4,8 +4,10 @@ import argparse
 import copy
 import csv
 import os
+import sys
 
 import numpy as np
+import torch
 
 from src.horizon_experiment import ProgressBar, build_parser, run_experiment
 
@@ -211,6 +213,9 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.use_cuda and not torch.cuda.is_available():
+        print("CUDA requested but not available. Exiting.")
+        sys.exit(1)
 
     datasets = parse_list(args.datasets, str)
     models = parse_list(args.models, str)
