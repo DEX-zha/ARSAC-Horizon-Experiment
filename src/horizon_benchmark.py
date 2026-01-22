@@ -194,9 +194,6 @@ def main():
     parser.add_argument(
         "--output-tex", type=str, default="outputs/horizon_benchmark_table.tex"
     )
-    parser.add_argument("--progress", action="store_true", default=True)
-    parser.add_argument("--no-progress", dest="progress", action="store_false")
-
     parser.set_defaults(
         series_len=8000,
         warmup=2000,
@@ -211,7 +208,6 @@ def main():
         mlp_patience=20,
         lstm_epochs=150,
         lstm_patience=20,
-        progress=False,
     )
 
     args = parser.parse_args()
