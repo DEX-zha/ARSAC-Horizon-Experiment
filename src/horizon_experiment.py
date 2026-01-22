@@ -19,6 +19,7 @@ from src.horizon_utils import (
     generate_lorenz,
     generate_mackey_glass,
     generate_rossler,
+    horizon_from_model_bound,
     set_seed,
     split_series,
     standardize_series,
@@ -351,6 +352,37 @@ def evaluate_mse(model, x, y, device="cpu"):
         return float(torch.mean((pred - y_t) ** 2).item())
 
 
+def estimate_model_error(
+    model, series_std, dim, lag, mode="quantile", quantile=0.95, scale=3.0
+):
+    """Estimates a model error bound from one-step residuals."""
+    try:
+        x_calib, y_calib = build_supervised(series_std, dim, lag, horizon=1)
+    except ValueError:
+        return 0.0, "none"
+
+    if x_calib.size == 0:
+        return 0.0, "none"
+
+    if hasattr(model, "predict_batch"):
+        preds = model.predict_batch(x_calib)
+    else:
+        preds = np.array([model.predict(x) for x in x_calib], dtype=np.float64)
+
+    preds = np.asarray(preds, dtype=np.float64).reshape(-1)
+    residuals = np.abs(preds - y_calib)
+    if residuals.size == 0:
+        return 0.0, "none"
+
+    if mode == "max":
+        return float(np.max(residuals)), "max"
+    if mode == "mean_std":
+        delta = float(np.mean(residuals) + scale * np.std(residuals))
+        return delta, f"mean+{scale:.1f}std"
+    delta = float(np.quantile(residuals, quantile))
+    return delta, f"quantile@{quantile:.2f}"
+
+
 def rolling_rmse(model, series_std, dim, lag, horizon_max):
     """Computes multi-step RMSE by rolling autoregression."""
     series_std = np.asarray(series_std, dtype=np.float64)
@@ -393,7 +425,7 @@ def horizon_from_lyapunov(lyapunov, init_err, tolerance):
     return math.log(tolerance / init_err) / lyapunov
 
 
-def plot_rmse(rmse_by_h, horizon_real, horizon_theory, out_path):
+def plot_rmse(rmse_by_h, horizon_real, horizon_theory, horizon_model, out_path):
     """Saves RMSE vs horizon plot."""
     x = np.arange(1, len(rmse_by_h) + 1, dtype=np.float64)
     mask = np.isfinite(rmse_by_h)
@@ -402,6 +434,13 @@ def plot_rmse(rmse_by_h, horizon_real, horizon_theory, out_path):
     plt.axvline(horizon_real, color="tab:red", linestyle="--", label="H_real")
     if math.isfinite(horizon_theory):
         plt.axvline(horizon_theory, color="tab:green", linestyle="--", label="H_theory")
+    if horizon_model is not None and math.isfinite(horizon_model):
+        plt.axvline(
+            horizon_model,
+            color="tab:purple",
+            linestyle="--",
+            label="H_model",
+        )
     plt.xlabel("Horizon (steps)")
     plt.ylabel("RMSE")
     plt.title("RMSE vs Horizon")
@@ -651,11 +690,15 @@ def run_experiment(args):
     device = torch.device("cuda" if args.use_cuda and torch.cuda.is_available() else "cpu")
     series = get_series(args)
 
-    train_raw, val_raw, test_raw = split_series(
-        series, train_ratio=args.train_ratio, val_ratio=args.val_ratio
+    train_raw, val_raw, calib_raw, test_raw = split_series(
+        series,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        calib_ratio=args.calib_ratio,
     )
     train_std, mean, std = standardize_series(train_raw)
     val_std = (val_raw - mean) / std
+    calib_std = (calib_raw - mean) / std if calib_raw.size else val_std
     test_std = (test_raw - mean) / std
 
     dim_values = list(range(args.dim_min, args.dim_max + 1))
@@ -714,6 +757,22 @@ def run_experiment(args):
     )
     horizon_real_time = horizon_real * dt
 
+    model_error, model_error_mode = estimate_model_error(
+        model,
+        calib_std,
+        best["dim"],
+        best["lag"],
+        mode=args.delta_mode,
+        quantile=args.delta_quantile,
+        scale=args.delta_scale,
+    )
+    horizon_model_steps = horizon_from_model_bound(
+        lyap_step, base_err, model_error, tolerance
+    )
+    horizon_model_time = (
+        horizon_model_steps * dt if math.isfinite(horizon_model_steps) else float("inf")
+    )
+
     os.makedirs(args.output_dir, exist_ok=True)
     csv_path = os.path.join(args.output_dir, "horizon_results.csv")
     write_header = not os.path.exists(csv_path)
@@ -742,6 +801,11 @@ def run_experiment(args):
                     "error_factor",
                     "error_tolerance",
                     "error_tolerance_used",
+                    "calib_ratio",
+                    "model_error",
+                    "model_error_mode",
+                    "horizon_model",
+                    "horizon_model_time",
                 ]
             )
         writer.writerow(
@@ -772,13 +836,24 @@ def run_experiment(args):
                 args.error_factor,
                 args.error_tolerance,
                 f"{tolerance:.6f}",
+                f"{args.calib_ratio:.3f}",
+                f"{model_error:.6f}",
+                model_error_mode,
+                f"{horizon_model_steps:.3f}"
+                if math.isfinite(horizon_model_steps)
+                else "inf",
+                f"{horizon_model_time:.3f}"
+                if math.isfinite(horizon_model_time)
+                else "inf",
             ]
         )
 
     if args.plot:
         rmse_path = os.path.join(args.output_dir, f"{args.plot_prefix}_rmse.png")
         log_path = os.path.join(args.output_dir, f"{args.plot_prefix}_log.png")
-        plot_rmse(rmse_by_h, horizon_real, horizon_theory_steps, rmse_path)
+        plot_rmse(
+            rmse_by_h, horizon_real, horizon_theory_steps, horizon_model_steps, rmse_path
+        )
         plot_log_divergence(rmse_by_h, lyap_step, log_path)
         print(f"Plots saved to {rmse_path} and {log_path}")
 
@@ -791,7 +866,8 @@ def run_experiment(args):
         f"test={test_mse:.6f} lyap_step={lyap_step:.4f} lyap_time={lyap_time:.4f} "
         f"horizon_real={horizon_real} horizon_real_time={horizon_real_time:.2f} "
         f"horizon_theory={horizon_theory_steps:.2f} horizon_theory_time={horizon_theory_time:.2f} "
-        f"tol={tolerance:.6f}{selection_note} elapsed={elapsed:.1f}s"
+        f"horizon_model={horizon_model_steps:.2f} horizon_model_time={horizon_model_time:.2f} "
+        f"delta={model_error:.4f} tol={tolerance:.6f}{selection_note} elapsed={elapsed:.1f}s"
     )
     return {
         "dim": best["dim"],
@@ -806,6 +882,11 @@ def run_experiment(args):
         "horizon_theory": horizon_theory_steps,
         "horizon_real_time": horizon_real_time,
         "horizon_theory_time": horizon_theory_time,
+        "horizon_model": horizon_model_steps,
+        "horizon_model_time": horizon_model_time,
+        "model_error": model_error,
+        "model_error_mode": model_error_mode,
+        "calib_ratio": args.calib_ratio,
         "error_tolerance_used": tolerance,
         "selection_metric": args.selection_metric,
         "selection_horizon": best["selection"]["horizon"]
@@ -831,6 +912,7 @@ def build_parser(add_help=True):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--val-ratio", type=float, default=0.15)
+    parser.add_argument("--calib-ratio", type=float, default=0.05)
 
     parser.add_argument("--dim-min", type=int, default=2)
     parser.add_argument("--dim-max", type=int, default=8)
@@ -870,6 +952,14 @@ def build_parser(add_help=True):
     )
     parser.add_argument("--error-factor", type=float, default=10.0)
     parser.add_argument("--error-tolerance", type=float, default=1.0)
+    parser.add_argument(
+        "--delta-mode",
+        type=str,
+        choices=["quantile", "max", "mean_std"],
+        default="quantile",
+    )
+    parser.add_argument("--delta-quantile", type=float, default=0.95)
+    parser.add_argument("--delta-scale", type=float, default=3.0)
 
     parser.add_argument("--lyap-max-t", type=int, default=25)
     parser.add_argument("--lyap-theiler", type=int, default=10)

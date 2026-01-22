@@ -13,6 +13,34 @@ from src.horizon_experiment import build_parser, run_experiment
 def parse_row(row):
     """Parses a CSV row into a normalized dictionary."""
     n = len(row)
+    if n == 25:
+        return {
+            "dataset": row[0],
+            "model": row[1],
+            "dim": row[2],
+            "lag": row[3],
+            "val_mse": row[4],
+            "selection_metric": row[5],
+            "selection_horizon": row[6],
+            "test_mse": row[7],
+            "lyapunov_step": row[8],
+            "lyapunov_time": row[9],
+            "lyapunov_dim": row[10],
+            "lyapunov_lag": row[11],
+            "horizon_real": row[12],
+            "horizon_real_time": row[13],
+            "horizon_theory": row[14],
+            "horizon_theory_time": row[15],
+            "error_mode": row[16],
+            "error_factor": row[17],
+            "error_tolerance": row[18],
+            "error_tolerance_used": row[19],
+            "calib_ratio": row[20],
+            "model_error": row[21],
+            "model_error_mode": row[22],
+            "horizon_model": row[23],
+            "horizon_model_time": row[24],
+        }
     if n == 20:
         return {
             "dataset": row[0],
@@ -115,12 +143,17 @@ def format_row(row):
         row.get("lyapunov_lag", ""),
         row.get("horizon_real", ""),
         row.get("horizon_theory", ""),
+        row.get("horizon_model", ""),
         row.get("horizon_real_time", ""),
         row.get("horizon_theory_time", ""),
+        row.get("horizon_model_time", ""),
+        row.get("model_error", ""),
+        row.get("model_error_mode", ""),
         row.get("selection_metric", ""),
         row.get("selection_horizon", ""),
         row.get("error_mode", ""),
         row.get("error_tolerance_used", ""),
+        row.get("calib_ratio", ""),
     ]
 
 
@@ -148,12 +181,17 @@ def format_result_row(result, dataset, model, args):
         fmt(result.get("lyapunov_lag")),
         fmt(result.get("horizon_real")),
         fmt(result.get("horizon_theory")),
+        fmt(result.get("horizon_model")),
         fmt(result.get("horizon_real_time")),
         fmt(result.get("horizon_theory_time")),
+        fmt(result.get("horizon_model_time")),
+        fmt(result.get("model_error")),
+        result.get("model_error_mode", ""),
         result.get("selection_metric", ""),
         fmt(result.get("selection_horizon")),
         args.error_mode,
         fmt(result.get("error_tolerance_used")),
+        fmt(result.get("calib_ratio")),
     ]
 
 
@@ -197,8 +235,11 @@ def format_median_row(result, model, seed_count, args):
         fmt(result.get("lyapunov_lag")),
         fmt(result.get("horizon_real")),
         fmt(result.get("horizon_theory")),
+        fmt(result.get("horizon_model")),
         fmt(result.get("horizon_real_time")),
         fmt(result.get("horizon_theory_time")),
+        fmt(result.get("horizon_model_time")),
+        fmt(result.get("model_error")),
         args.selection_metric,
         args.error_mode,
         fmt(result.get("error_tolerance_used")),
@@ -264,6 +305,11 @@ def main():
                 "horizon_real_time": result.get("horizon_real_time"),
                 "horizon_theory": result.get("horizon_theory"),
                 "horizon_theory_time": result.get("horizon_theory_time"),
+                "horizon_model": result.get("horizon_model"),
+                "horizon_model_time": result.get("horizon_model_time"),
+                "model_error": result.get("model_error"),
+                "model_error_mode": result.get("model_error_mode"),
+                "calib_ratio": result.get("calib_ratio"),
                 "error_mode": args.error_mode,
                 "error_tolerance_used": result.get("error_tolerance_used"),
             }
@@ -294,12 +340,17 @@ def main():
                 "lyapunov_lag": median_value([r.get("lyapunov_lag") for r in results]),
                 "horizon_real": median_value([r.get("horizon_real") for r in results]),
                 "horizon_theory": median_value([r.get("horizon_theory") for r in results]),
+                "horizon_model": median_value([r.get("horizon_model") for r in results]),
                 "horizon_real_time": median_value(
                     [r.get("horizon_real_time") for r in results]
                 ),
                 "horizon_theory_time": median_value(
                     [r.get("horizon_theory_time") for r in results]
                 ),
+                "horizon_model_time": median_value(
+                    [r.get("horizon_model_time") for r in results]
+                ),
+                "model_error": median_value([r.get("model_error") for r in results]),
                 "error_tolerance_used": median_value(
                     [r.get("error_tolerance_used") for r in results]
                 ),
@@ -318,8 +369,11 @@ def main():
             "lyap_lag_med",
             "horizon_real_med",
             "horizon_theory_med",
+            "horizon_model_med",
             "horizon_real_time_med",
             "horizon_theory_time_med",
+            "horizon_model_time_med",
+            "model_error_med",
             "selection_metric",
             "error_mode",
             "error_tol_used_med",
@@ -336,12 +390,17 @@ def main():
             "lyap_lag",
             "horizon_real",
             "horizon_theory",
+            "horizon_model",
             "horizon_real_time",
             "horizon_theory_time",
+            "horizon_model_time",
+            "model_error",
+            "model_error_mode",
             "selection_metric",
             "selection_horizon",
             "error_mode",
             "error_tol_used",
+            "calib_ratio",
         ]
 
     lines = []

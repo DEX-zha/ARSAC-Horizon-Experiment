@@ -36,6 +36,13 @@ Rigorous benchmark (long):
 
 You can disable the progress bar with `--no-progress`.
 
+Model-aware bound options (calibration and delta mode):
+
+```
+./venv/bin/python -m src.horizon_experiment \
+  --calib-ratio 0.05 --delta-mode quantile --delta-quantile 0.95
+```
+
 ## Outputs
 
 - `outputs/horizon_benchmark.md` summary table

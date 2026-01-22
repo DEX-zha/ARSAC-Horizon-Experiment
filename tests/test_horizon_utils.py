@@ -13,6 +13,7 @@ from src.horizon_utils import (
     embed_series,
     estimate_lyapunov,
     generate_logistic_map,
+    horizon_from_model_bound,
 )
 
 
@@ -68,6 +69,11 @@ class TestHorizonUtils(unittest.TestCase):
         )
         self.assertGreater(lyap_c, 0.1)
         self.assertLess(lyap_s, 0.05)
+
+    def test_model_bound_monotonic(self):
+        h_low = horizon_from_model_bound(0.1, init_err=0.01, delta=0.0, tolerance=0.1)
+        h_high = horizon_from_model_bound(0.1, init_err=0.01, delta=0.05, tolerance=0.1)
+        self.assertLessEqual(h_high, h_low)
 
 
 if __name__ == "__main__":

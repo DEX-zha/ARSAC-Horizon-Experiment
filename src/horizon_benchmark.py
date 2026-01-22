@@ -71,8 +71,13 @@ def summarize_results(results):
         "lyapunov_lag": median_value([r.get("lyapunov_lag") for r in results]),
         "horizon_real": median_value([r.get("horizon_real") for r in results]),
         "horizon_theory": median_value([r.get("horizon_theory") for r in results]),
+        "horizon_model": median_value([r.get("horizon_model") for r in results]),
         "horizon_real_time": median_value([r.get("horizon_real_time") for r in results]),
         "horizon_theory_time": median_value([r.get("horizon_theory_time") for r in results]),
+        "horizon_model_time": median_value(
+            [r.get("horizon_model_time") for r in results]
+        ),
+        "model_error": median_value([r.get("model_error") for r in results]),
         "error_tolerance_used": median_value(
             [r.get("error_tolerance_used") for r in results]
         ),
@@ -94,8 +99,11 @@ def write_markdown_table(rows, output_path, selection_metric, error_mode):
         "lyap_lag_med",
         "h_real_med",
         "h_theory_med",
+        "h_model_med",
         "h_real_time_med",
         "h_theory_time_med",
+        "h_model_time_med",
+        "delta_med",
         "selection_metric",
         "error_mode",
         "error_tol_used_med",
@@ -117,8 +125,11 @@ def write_markdown_table(rows, output_path, selection_metric, error_mode):
             format_value(row.get("lyapunov_lag")),
             format_value(row.get("horizon_real")),
             format_value(row.get("horizon_theory")),
+            format_value(row.get("horizon_model")),
             format_value(row.get("horizon_real_time")),
             format_value(row.get("horizon_theory_time")),
+            format_value(row.get("horizon_model_time")),
+            format_value(row.get("model_error")),
             selection_metric,
             error_mode,
             format_value(row.get("error_tolerance_used")),
@@ -135,10 +146,10 @@ def write_latex_table(rows, output_path, selection_metric, error_mode):
     lines.append(r"\begin{table}[ht]")
     lines.append(r"\centering")
     lines.append(r"\resizebox{\textwidth}{!}{")
-    lines.append(r"\begin{tabular}{l l r r r r r r r r}")
+    lines.append(r"\begin{tabular}{l l r r r r r r r r r r}")
     lines.append(r"\hline")
     lines.append(
-        r"Dataset & Model & Seeds & dim & lag & valMSE & testMSE & $H_{real}$ & $H_{theory}$ & $\lambda$ \\"
+        r"Dataset & Model & Seeds & dim & lag & valMSE & testMSE & $H_{real}$ & $H_{theory}$ & $H_{model}$ & $\lambda$ & $\delta$ \\"
     )
     lines.append(r"\hline")
     for row in rows:
@@ -152,7 +163,9 @@ def write_latex_table(rows, output_path, selection_metric, error_mode):
             format_value(row.get("test_mse"), decimals=6),
             format_value(row.get("horizon_real"), decimals=2),
             format_value(row.get("horizon_theory"), decimals=2),
+            format_value(row.get("horizon_model"), decimals=2),
             format_value(row.get("lyapunov_step"), decimals=4),
+            format_value(row.get("model_error"), decimals=4),
         ]
         lines.append(" & ".join(values) + r" \\")
     lines.append(r"\hline")
@@ -255,6 +268,11 @@ def main():
                     "horizon_real_time": result.get("horizon_real_time"),
                     "horizon_theory": result.get("horizon_theory"),
                     "horizon_theory_time": result.get("horizon_theory_time"),
+                    "horizon_model": result.get("horizon_model"),
+                    "horizon_model_time": result.get("horizon_model_time"),
+                    "model_error": result.get("model_error"),
+                    "model_error_mode": result.get("model_error_mode"),
+                    "calib_ratio": result.get("calib_ratio"),
                     "error_tolerance_used": result.get("error_tolerance_used"),
                     "selection_metric": result.get("selection_metric"),
                     "selection_horizon": result.get("selection_horizon"),
@@ -277,6 +295,11 @@ def main():
                         format_value(record["horizon_real_time"], decimals=3),
                         format_value(record["horizon_theory"]),
                         format_value(record["horizon_theory_time"], decimals=3),
+                        format_value(record["horizon_model"]),
+                        format_value(record["horizon_model_time"], decimals=3),
+                        format_value(record["model_error"]),
+                        record["model_error_mode"],
+                        format_value(record.get("calib_ratio")),
                         args.selection_metric,
                         record.get("selection_horizon", ""),
                         args.error_mode,
@@ -319,6 +342,11 @@ def main():
         "horizon_real_time",
         "horizon_theory",
         "horizon_theory_time",
+        "horizon_model",
+        "horizon_model_time",
+        "model_error",
+        "model_error_mode",
+        "calib_ratio",
         "selection_metric",
         "selection_horizon",
         "error_mode",
@@ -339,8 +367,11 @@ def main():
         "lyap_lag_med",
         "horizon_real_med",
         "horizon_theory_med",
+        "horizon_model_med",
         "horizon_real_time_med",
         "horizon_theory_time_med",
+        "horizon_model_time_med",
+        "delta_med",
         "error_tol_used_med",
     ]
     summary_csv_rows = []
@@ -359,8 +390,11 @@ def main():
                 format_value(row.get("lyapunov_lag")),
                 format_value(row.get("horizon_real")),
                 format_value(row.get("horizon_theory")),
+                format_value(row.get("horizon_model")),
                 format_value(row.get("horizon_real_time")),
                 format_value(row.get("horizon_theory_time")),
+                format_value(row.get("horizon_model_time")),
+                format_value(row.get("model_error")),
                 format_value(row.get("error_tolerance_used")),
             ]
         )

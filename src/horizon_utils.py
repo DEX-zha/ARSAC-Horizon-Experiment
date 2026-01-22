@@ -113,15 +113,52 @@ def standardize_series(series, mean=None, std=None):
     return (series - mean) / std, mean, std
 
 
-def split_series(series, train_ratio=0.7, val_ratio=0.15):
-    """Splits a series into train, validation, and test parts."""
+def split_series(series, train_ratio=0.7, val_ratio=0.15, calib_ratio=0.0):
+    """Splits a series into train, validation, calibration, and test parts."""
+    if train_ratio + val_ratio + calib_ratio >= 1.0:
+        raise ValueError("train+val+calib ratios must sum to < 1.0")
     n = len(series)
     train_end = int(n * train_ratio)
     val_end = int(n * (train_ratio + val_ratio))
+    calib_end = int(n * (train_ratio + val_ratio + calib_ratio))
     train = series[:train_end]
     val = series[train_end:val_end]
-    test = series[val_end:]
-    return train, val, test
+    calib = series[val_end:calib_end]
+    test = series[calib_end:]
+    return train, val, calib, test
+
+
+def horizon_from_model_bound(lyap_step, init_err, delta, tolerance):
+    """Estimates horizon from a model-aware error bound.
+
+    Uses e_{t+1} <= L * e_t + delta with L = exp(lyap_step).
+    """
+    if tolerance <= 0:
+        return 0.0
+    init_err = max(0.0, float(init_err))
+    delta = max(0.0, float(delta))
+    if init_err >= tolerance:
+        return 0.0
+
+    if lyap_step <= 0.0:
+        if delta <= 0.0:
+            return float("inf")
+        return math.ceil((tolerance - init_err) / delta)
+
+    growth = math.exp(lyap_step)
+    if abs(growth - 1.0) < 1e-12:
+        if delta <= 0.0:
+            return float("inf")
+        return math.ceil((tolerance - init_err) / delta)
+
+    offset = delta / (growth - 1.0)
+    denom = init_err + offset
+    if denom <= 0.0:
+        return 0.0
+    ratio = (tolerance + offset) / denom
+    if ratio <= 1.0:
+        return 0.0
+    return math.ceil(math.log(ratio) / math.log(growth))
 
 
 def embed_series(series, dim, lag):
