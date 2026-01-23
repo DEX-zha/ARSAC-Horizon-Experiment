@@ -79,7 +79,14 @@ class TestHorizonUtils(unittest.TestCase):
     def test_expansion_quantile(self):
         series = generate_logistic_map(800, r=4.0, x0=0.2, warmup=100)
         lq, ratios = estimate_expansion_quantile(
-            series, dim=3, lag=1, quantile=0.9, theiler=5, max_pairs=100, seed=0
+            series,
+            dim=3,
+            lag=1,
+            quantile=0.9,
+            theiler=5,
+            max_pairs=100,
+            seed=0,
+            horizon=3,
         )
         self.assertTrue(lq > 0.0)
         self.assertTrue(ratios.size >= 0)

@@ -2,195 +2,19 @@
 
 import argparse
 import copy
-import csv
-import os
 import sys
 
-import numpy as np
 import torch
 
+from src.horizon_benchmark_utils import (
+    format_value,
+    parse_list,
+    summarize_results,
+    write_csv_rows,
+    write_latex_table,
+    write_markdown_table,
+)
 from src.horizon_experiment import ProgressBar, build_parser, run_experiment
-
-
-def parse_list(value, cast=str):
-    """Parses a comma-separated list.
-
-    Args:
-        value: Comma-separated string.
-        cast: Callable to convert each token.
-
-    Returns:
-        List of converted items.
-    """
-    items = []
-    for part in value.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        items.append(cast(part))
-    return items
-
-
-def median_value(values):
-    """Returns the median of non-None values."""
-    values = [v for v in values if v is not None]
-    if not values:
-        return None
-    return float(np.median(np.array(values, dtype=np.float64)))
-
-
-def format_value(value, decimals=6):
-    """Formats numeric values for tables and CSV output."""
-    if value is None:
-        return ""
-    if value == float("inf"):
-        return "inf"
-    if isinstance(value, (int, np.integer)):
-        return str(int(value))
-    fmt = f"{{:.{decimals}f}}"
-    return fmt.format(float(value))
-
-
-def summarize_results(results):
-    """Summarizes run results with median statistics.
-
-    Args:
-        results: List of per-seed result dictionaries.
-
-    Returns:
-        Dictionary with median metrics.
-    """
-    return {
-        "seed_count": len(results),
-        "dim": median_value([r.get("dim") for r in results]),
-        "lag": median_value([r.get("lag") for r in results]),
-        "val_mse": median_value([r.get("val_mse") for r in results]),
-        "test_mse": median_value([r.get("test_mse") for r in results]),
-        "lyapunov_step": median_value([r.get("lyapunov_step") for r in results]),
-        "lyapunov_dim": median_value([r.get("lyapunov_dim") for r in results]),
-        "lyapunov_lag": median_value([r.get("lyapunov_lag") for r in results]),
-        "horizon_real": median_value([r.get("horizon_real") for r in results]),
-        "horizon_theory": median_value([r.get("horizon_theory") for r in results]),
-        "horizon_model": median_value([r.get("horizon_model") for r in results]),
-        "horizon_real_time": median_value([r.get("horizon_real_time") for r in results]),
-        "horizon_theory_time": median_value([r.get("horizon_theory_time") for r in results]),
-        "horizon_model_time": median_value(
-            [r.get("horizon_model_time") for r in results]
-        ),
-        "model_error": median_value([r.get("model_error") for r in results]),
-        "expansion_Lq": median_value([r.get("expansion_Lq") for r in results]),
-        "error_tolerance_used": median_value(
-            [r.get("error_tolerance_used") for r in results]
-        ),
-    }
-
-
-def write_markdown_table(rows, output_path, selection_metric, error_mode):
-    """Writes a Markdown summary table."""
-    header = [
-        "dataset",
-        "model",
-        "seeds",
-        "dim_med",
-        "lag_med",
-        "val_mse_med",
-        "test_mse_med",
-        "lyap_step_med",
-        "lyap_dim_med",
-        "lyap_lag_med",
-        "h_real_med",
-        "h_theory_med",
-        "h_model_med",
-        "h_real_time_med",
-        "h_theory_time_med",
-        "h_model_time_med",
-        "delta_med",
-        "Lq_med",
-        "selection_metric",
-        "error_mode",
-        "error_tol_used_med",
-    ]
-    lines = ["# Horizon benchmark (rigorous)", ""]
-    lines.append("| " + " | ".join(header) + " |")
-    lines.append("| " + " | ".join(["---"] * len(header)) + " |")
-    for row in rows:
-        values = [
-            row.get("dataset", ""),
-            row.get("model", ""),
-            str(row.get("seed_count", "")),
-            format_value(row.get("dim")),
-            format_value(row.get("lag")),
-            format_value(row.get("val_mse")),
-            format_value(row.get("test_mse")),
-            format_value(row.get("lyapunov_step")),
-            format_value(row.get("lyapunov_dim")),
-            format_value(row.get("lyapunov_lag")),
-            format_value(row.get("horizon_real")),
-            format_value(row.get("horizon_theory")),
-            format_value(row.get("horizon_model")),
-            format_value(row.get("horizon_real_time")),
-            format_value(row.get("horizon_theory_time")),
-            format_value(row.get("horizon_model_time")),
-            format_value(row.get("model_error")),
-            format_value(row.get("expansion_Lq")),
-            selection_metric,
-            error_mode,
-            format_value(row.get("error_tolerance_used")),
-        ]
-        lines.append("| " + " | ".join(values) + " |")
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "w") as f:
-        f.write("\n".join(lines) + "\n")
-
-
-def write_latex_table(rows, output_path, selection_metric, error_mode):
-    """Writes a LaTeX table for the benchmark summary."""
-    lines = []
-    lines.append(r"\begin{table}[ht]")
-    lines.append(r"\centering")
-    lines.append(r"\resizebox{\textwidth}{!}{")
-    lines.append(r"\begin{tabular}{l l r r r r r r r r r r r}")
-    lines.append(r"\hline")
-    lines.append(
-        r"Dataset & Model & Seeds & dim & lag & valMSE & testMSE & $H_{real}$ & $H_{theory}$ & $H_{model}$ & $\lambda$ & $\delta$ & $L_q$ \\"
-    )
-    lines.append(r"\hline")
-    for row in rows:
-        values = [
-            row.get("dataset", ""),
-            row.get("model", ""),
-            str(row.get("seed_count", "")),
-            format_value(row.get("dim"), decimals=2),
-            format_value(row.get("lag"), decimals=2),
-            format_value(row.get("val_mse"), decimals=6),
-            format_value(row.get("test_mse"), decimals=6),
-            format_value(row.get("horizon_real"), decimals=2),
-            format_value(row.get("horizon_theory"), decimals=2),
-            format_value(row.get("horizon_model"), decimals=2),
-            format_value(row.get("lyapunov_step"), decimals=4),
-            format_value(row.get("model_error"), decimals=4),
-            format_value(row.get("expansion_Lq"), decimals=4),
-        ]
-        lines.append(" & ".join(values) + r" \\")
-    lines.append(r"\hline")
-    lines.append(r"\end{tabular}")
-    lines.append(r"}")
-    lines.append(
-        rf"\caption{{Rigorous horizon benchmark (selection={selection_metric}, error={error_mode}).}}"
-    )
-    lines.append(r"\end{table}")
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "w") as f:
-        f.write("\n".join(lines) + "\n")
-
-
-def write_csv_rows(rows, output_path, header):
-    """Writes rows to CSV with a header."""
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(rows)
 
 
 def main():
@@ -274,11 +98,26 @@ def main():
                     "horizon_theory_time": result.get("horizon_theory_time"),
                     "horizon_model": result.get("horizon_model"),
                     "horizon_model_time": result.get("horizon_model_time"),
+                    "horizon_est": result.get("horizon_est"),
+                    "horizon_est_time": result.get("horizon_est_time"),
                     "model_error": result.get("model_error"),
                     "model_error_mode": result.get("model_error_mode"),
+                    "model_error_mean": result.get("model_error_mean"),
+                    "delta_local": result.get("delta_local"),
+                    "delta_local_k": result.get("delta_local_k"),
+                    "delta_local_quantile": result.get("delta_local_quantile"),
+                    "delta_local_samples": result.get("delta_local_samples"),
                     "calib_ratio": result.get("calib_ratio"),
                     "expansion_Lq": result.get("expansion_Lq"),
+                    "expansion_horizon": result.get("expansion_horizon"),
+                    "expansion_mean": result.get("expansion_mean"),
+                    "growth_source": result.get("growth_source"),
+                    "growth_horizon": result.get("growth_horizon"),
+                    "growth_Lq": result.get("growth_Lq"),
+                    "growth_Lmean": result.get("growth_Lmean"),
                     "bound_mode": result.get("bound_mode"),
+                    "calibration_scale": result.get("calibration_scale"),
+                    "horizon_model_cal": result.get("horizon_model_cal"),
                     "error_tolerance_used": result.get("error_tolerance_used"),
                     "selection_metric": result.get("selection_metric"),
                     "selection_horizon": result.get("selection_horizon"),
@@ -303,11 +142,26 @@ def main():
                         format_value(record["horizon_theory_time"], decimals=3),
                         format_value(record["horizon_model"]),
                         format_value(record["horizon_model_time"], decimals=3),
+                        format_value(record["horizon_est"]),
+                        format_value(record["horizon_est_time"], decimals=3),
                         format_value(record["model_error"]),
                         record["model_error_mode"],
+                        format_value(record.get("model_error_mean")),
+                        record.get("delta_local"),
+                        record.get("delta_local_k"),
+                        format_value(record.get("delta_local_quantile")),
+                        record.get("delta_local_samples"),
                         format_value(record.get("calib_ratio")),
                         format_value(record.get("expansion_Lq")),
+                        format_value(record.get("expansion_horizon")),
+                        format_value(record.get("expansion_mean")),
+                        record.get("growth_source", ""),
+                        format_value(record.get("growth_horizon")),
+                        format_value(record.get("growth_Lq")),
+                        format_value(record.get("growth_Lmean")),
                         record.get("bound_mode"),
+                        format_value(record.get("calibration_scale")),
+                        format_value(record.get("horizon_model_cal")),
                         args.selection_metric,
                         record.get("selection_horizon", ""),
                         args.error_mode,
@@ -352,11 +206,26 @@ def main():
         "horizon_theory_time",
         "horizon_model",
         "horizon_model_time",
+        "horizon_est",
+        "horizon_est_time",
         "model_error",
         "model_error_mode",
+        "model_error_mean",
+        "delta_local",
+        "delta_local_k",
+        "delta_local_quantile",
+        "delta_local_samples",
         "calib_ratio",
         "expansion_Lq",
+        "expansion_horizon",
+        "expansion_mean",
+        "growth_source",
+        "growth_horizon",
+        "growth_Lq",
+        "growth_Lmean",
         "bound_mode",
+        "calibration_scale",
+        "horizon_model_cal",
         "selection_metric",
         "selection_horizon",
         "error_mode",
@@ -381,8 +250,16 @@ def main():
         "horizon_real_time_med",
         "horizon_theory_time_med",
         "horizon_model_time_med",
+        "horizon_est_med",
+        "horizon_est_time_med",
         "delta_med",
+        "delta_mean_med",
+        "growth_horizon_med",
         "Lq_med",
+        "L_mean_med",
+        "growth_source",
+        "calibration_scale_med",
+        "horizon_model_cal_med",
         "error_tol_used_med",
     ]
     summary_csv_rows = []
@@ -405,8 +282,20 @@ def main():
                 format_value(row.get("horizon_real_time")),
                 format_value(row.get("horizon_theory_time")),
                 format_value(row.get("horizon_model_time")),
+                format_value(row.get("horizon_est")),
+                format_value(row.get("horizon_est_time")),
                 format_value(row.get("model_error")),
-                format_value(row.get("expansion_Lq")),
+                format_value(row.get("model_error_mean")),
+                row.get("delta_local", ""),
+                row.get("delta_local_k", ""),
+                format_value(row.get("delta_local_quantile")),
+                row.get("delta_local_samples", ""),
+                format_value(row.get("growth_horizon")),
+                format_value(row.get("growth_Lq")),
+                format_value(row.get("growth_Lmean")),
+                row.get("growth_source", ""),
+                format_value(row.get("calibration_scale")),
+                format_value(row.get("horizon_model_cal")),
                 format_value(row.get("error_tolerance_used")),
             ]
         )

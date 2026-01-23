@@ -171,16 +171,21 @@ def estimate_expansion_quantile(
     theiler=10,
     max_pairs=500,
     seed=0,
+    horizon=1,
 ):
     """Estimates a quantile of local expansion factors in embedded space."""
     series = np.asarray(series, dtype=np.float64)
     embedded = embed_series(series, dim, lag)
     n = embedded.shape[0]
+    if horizon < 1:
+        raise ValueError("horizon must be >= 1")
     if n < 3:
         return 1.0, np.array([], dtype=np.float64)
 
     rng = np.random.default_rng(seed)
-    max_index = n - 2
+    max_index = n - horizon - 1
+    if max_index <= 0:
+        return 1.0, np.array([], dtype=np.float64)
     indices = np.arange(max_index, dtype=np.int64)
     if max_pairs is None or max_pairs >= len(indices):
         sample = indices
@@ -198,12 +203,12 @@ def estimate_expansion_quantile(
         d0 = dist[j]
         if not np.isfinite(d0) or d0 <= 1e-12:
             continue
-        if i + 1 >= n or j + 1 >= n:
+        if i + horizon >= n or j + horizon >= n:
             continue
-        d1 = np.linalg.norm(embedded[i + 1] - embedded[j + 1])
+        d1 = np.linalg.norm(embedded[i + horizon] - embedded[j + horizon])
         if d1 <= 1e-12:
             continue
-        ratios.append(d1 / d0)
+        ratios.append((d1 / d0) ** (1.0 / horizon))
 
     if not ratios:
         return 1.0, np.array([], dtype=np.float64)

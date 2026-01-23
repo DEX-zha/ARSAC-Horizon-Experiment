@@ -5,285 +5,15 @@ import copy
 import csv
 import os
 
-import numpy as np
-
+from src.horizon_compare_utils import (
+    format_median_row,
+    format_result_row,
+    format_row,
+    median_value,
+    parse_row,
+    parse_seeds,
+)
 from src.horizon_experiment import build_parser, run_experiment
-
-
-def parse_row(row):
-    """Parses a CSV row into a normalized dictionary."""
-    n = len(row)
-    if n == 32:
-        return {
-            "dataset": row[0],
-            "model": row[1],
-            "dim": row[2],
-            "lag": row[3],
-            "val_mse": row[4],
-            "selection_metric": row[5],
-            "selection_horizon": row[6],
-            "test_mse": row[7],
-            "lyapunov_step": row[8],
-            "lyapunov_time": row[9],
-            "lyapunov_dim": row[10],
-            "lyapunov_lag": row[11],
-            "horizon_real": row[12],
-            "horizon_real_time": row[13],
-            "horizon_theory": row[14],
-            "horizon_theory_time": row[15],
-            "error_mode": row[16],
-            "error_factor": row[17],
-            "error_tolerance": row[18],
-            "error_tolerance_used": row[19],
-            "calib_ratio": row[20],
-            "model_error": row[21],
-            "model_error_mode": row[22],
-            "horizon_model": row[23],
-            "horizon_model_time": row[24],
-            "expansion_quantile": row[25],
-            "expansion_samples": row[26],
-            "expansion_theiler": row[27],
-            "expansion_dim": row[28],
-            "expansion_lag": row[29],
-            "expansion_Lq": row[30],
-            "bound_mode": row[31],
-        }
-    if n == 25:
-        return {
-            "dataset": row[0],
-            "model": row[1],
-            "dim": row[2],
-            "lag": row[3],
-            "val_mse": row[4],
-            "selection_metric": row[5],
-            "selection_horizon": row[6],
-            "test_mse": row[7],
-            "lyapunov_step": row[8],
-            "lyapunov_time": row[9],
-            "lyapunov_dim": row[10],
-            "lyapunov_lag": row[11],
-            "horizon_real": row[12],
-            "horizon_real_time": row[13],
-            "horizon_theory": row[14],
-            "horizon_theory_time": row[15],
-            "error_mode": row[16],
-            "error_factor": row[17],
-            "error_tolerance": row[18],
-            "error_tolerance_used": row[19],
-            "calib_ratio": row[20],
-            "model_error": row[21],
-            "model_error_mode": row[22],
-            "horizon_model": row[23],
-            "horizon_model_time": row[24],
-        }
-    if n == 20:
-        return {
-            "dataset": row[0],
-            "model": row[1],
-            "dim": row[2],
-            "lag": row[3],
-            "val_mse": row[4],
-            "selection_metric": row[5],
-            "selection_horizon": row[6],
-            "test_mse": row[7],
-            "lyapunov_step": row[8],
-            "lyapunov_time": row[9],
-            "lyapunov_dim": row[10],
-            "lyapunov_lag": row[11],
-            "horizon_real": row[12],
-            "horizon_real_time": row[13],
-            "horizon_theory": row[14],
-            "horizon_theory_time": row[15],
-            "error_mode": row[16],
-            "error_factor": row[17],
-            "error_tolerance": row[18],
-            "error_tolerance_used": row[19],
-        }
-    if n >= 18:
-        return {
-            "dataset": row[0],
-            "model": row[1],
-            "dim": row[2],
-            "lag": row[3],
-            "val_mse": row[4],
-            "selection_metric": row[5],
-            "selection_horizon": row[6],
-            "test_mse": row[7],
-            "lyapunov_step": row[8],
-            "lyapunov_time": row[9],
-            "horizon_real": row[10],
-            "horizon_real_time": row[11],
-            "horizon_theory": row[12],
-            "horizon_theory_time": row[13],
-            "error_mode": row[14],
-            "error_factor": row[15],
-            "error_tolerance": row[16],
-            "error_tolerance_used": row[17],
-        }
-    if n == 13:
-        return {
-            "dataset": row[0],
-            "model": row[1],
-            "dim": row[2],
-            "lag": row[3],
-            "val_mse": row[4],
-            "selection_metric": "",
-            "selection_horizon": "",
-            "test_mse": row[5],
-            "lyapunov_step": row[6],
-            "lyapunov_time": row[7],
-            "horizon_real": row[8],
-            "horizon_real_time": row[9],
-            "horizon_theory": row[10],
-            "horizon_theory_time": row[11],
-            "error_mode": "absolute",
-            "error_factor": "",
-            "error_tolerance": row[12],
-            "error_tolerance_used": row[12],
-        }
-    if n == 10:
-        return {
-            "dataset": row[0],
-            "model": row[1],
-            "dim": row[2],
-            "lag": row[3],
-            "val_mse": row[4],
-            "selection_metric": "",
-            "selection_horizon": "",
-            "test_mse": row[5],
-            "lyapunov_step": row[6],
-            "lyapunov_time": "",
-            "horizon_real": row[7],
-            "horizon_real_time": "",
-            "horizon_theory": row[8],
-            "horizon_theory_time": "",
-            "error_mode": "absolute",
-            "error_factor": "",
-            "error_tolerance": row[9],
-            "error_tolerance_used": row[9],
-        }
-    return None
-
-
-def format_row(row):
-    """Formats a parsed row for table output."""
-    return [
-        row.get("model", ""),
-        row.get("dim", ""),
-        row.get("lag", ""),
-        row.get("val_mse", ""),
-        row.get("test_mse", ""),
-        row.get("lyapunov_step", ""),
-        row.get("lyapunov_dim", ""),
-        row.get("lyapunov_lag", ""),
-        row.get("horizon_real", ""),
-        row.get("horizon_theory", ""),
-        row.get("horizon_model", ""),
-        row.get("horizon_real_time", ""),
-        row.get("horizon_theory_time", ""),
-        row.get("horizon_model_time", ""),
-        row.get("model_error", ""),
-        row.get("model_error_mode", ""),
-        row.get("expansion_Lq", ""),
-        row.get("bound_mode", ""),
-        row.get("selection_metric", ""),
-        row.get("selection_horizon", ""),
-        row.get("error_mode", ""),
-        row.get("error_tolerance_used", ""),
-        row.get("calib_ratio", ""),
-    ]
-
-
-def format_result_row(result, dataset, model, args):
-    """Formats a live run result for table output."""
-    def fmt(value):
-        if value is None:
-            return ""
-        if isinstance(value, float):
-            if not value and value != 0.0:
-                return ""
-            if value == float("inf"):
-                return "inf"
-            return f"{value:.6f}"
-        return str(value)
-
-    return [
-        model,
-        str(result.get("dim", "")),
-        str(result.get("lag", "")),
-        fmt(result.get("val_loss")),
-        fmt(result.get("test_mse")),
-        fmt(result.get("lyapunov_step")),
-        fmt(result.get("lyapunov_dim")),
-        fmt(result.get("lyapunov_lag")),
-        fmt(result.get("horizon_real")),
-        fmt(result.get("horizon_theory")),
-        fmt(result.get("horizon_model")),
-        fmt(result.get("horizon_real_time")),
-        fmt(result.get("horizon_theory_time")),
-        fmt(result.get("horizon_model_time")),
-        fmt(result.get("model_error")),
-        result.get("model_error_mode", ""),
-        fmt(result.get("expansion_Lq")),
-        result.get("bound_mode", ""),
-        result.get("selection_metric", ""),
-        fmt(result.get("selection_horizon")),
-        args.error_mode,
-        fmt(result.get("error_tolerance_used")),
-        fmt(result.get("calib_ratio")),
-    ]
-
-
-def parse_seeds(seed_str):
-    """Parses a comma-separated list of seeds."""
-    seeds = []
-    for part in seed_str.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        seeds.append(int(part))
-    return seeds
-
-
-def median_value(values):
-    """Returns the median of non-None values."""
-    values = [v for v in values if v is not None]
-    if not values:
-        return None
-    return float(np.median(np.array(values, dtype=np.float64)))
-
-
-def format_median_row(result, model, seed_count, args):
-    """Formats the median row for rigorous comparisons."""
-    def fmt(value):
-        if value is None:
-            return ""
-        if value == float("inf"):
-            return "inf"
-        return f"{value:.6f}"
-
-    return [
-        model,
-        str(seed_count),
-        fmt(result.get("dim")),
-        fmt(result.get("lag")),
-        fmt(result.get("val_mse")),
-        fmt(result.get("test_mse")),
-        fmt(result.get("lyapunov_step")),
-        fmt(result.get("lyapunov_dim")),
-        fmt(result.get("lyapunov_lag")),
-        fmt(result.get("horizon_real")),
-        fmt(result.get("horizon_theory")),
-        fmt(result.get("horizon_model")),
-        fmt(result.get("horizon_real_time")),
-        fmt(result.get("horizon_theory_time")),
-        fmt(result.get("horizon_model_time")),
-        fmt(result.get("model_error")),
-        fmt(result.get("expansion_Lq")),
-        args.selection_metric,
-        args.error_mode,
-        fmt(result.get("error_tolerance_used")),
-    ]
 
 
 def main():
@@ -347,11 +77,26 @@ def main():
                 "horizon_theory_time": result.get("horizon_theory_time"),
                 "horizon_model": result.get("horizon_model"),
                 "horizon_model_time": result.get("horizon_model_time"),
+                "horizon_est": result.get("horizon_est"),
+                "horizon_est_time": result.get("horizon_est_time"),
                 "model_error": result.get("model_error"),
                 "model_error_mode": result.get("model_error_mode"),
+                "model_error_mean": result.get("model_error_mean"),
+                "delta_local": result.get("delta_local"),
+                "delta_local_k": result.get("delta_local_k"),
+                "delta_local_quantile": result.get("delta_local_quantile"),
+                "delta_local_samples": result.get("delta_local_samples"),
                 "calib_ratio": result.get("calib_ratio"),
                 "expansion_Lq": result.get("expansion_Lq"),
+                "expansion_horizon": result.get("expansion_horizon"),
+                "expansion_mean": result.get("expansion_mean"),
+                "growth_source": result.get("growth_source"),
+                "growth_horizon": result.get("growth_horizon"),
+                "growth_Lq": result.get("growth_Lq"),
+                "growth_Lmean": result.get("growth_Lmean"),
                 "bound_mode": result.get("bound_mode"),
+                "calibration_scale": result.get("calibration_scale"),
+                "horizon_model_cal": result.get("horizon_model_cal"),
                 "error_mode": args.error_mode,
                 "error_tolerance_used": result.get("error_tolerance_used"),
             }
@@ -392,8 +137,39 @@ def main():
                 "horizon_model_time": median_value(
                     [r.get("horizon_model_time") for r in results]
                 ),
+                "horizon_est": median_value([r.get("horizon_est") for r in results]),
+                "horizon_est_time": median_value(
+                    [r.get("horizon_est_time") for r in results]
+                ),
                 "model_error": median_value([r.get("model_error") for r in results]),
+                "model_error_mean": median_value(
+                    [r.get("model_error_mean") for r in results]
+                ),
+                "delta_local": results[0].get("delta_local") if results else "",
+                "delta_local_k": results[0].get("delta_local_k") if results else "",
+                "delta_local_quantile": results[0].get("delta_local_quantile")
+                if results
+                else "",
+                "delta_local_samples": results[0].get("delta_local_samples")
+                if results
+                else "",
                 "expansion_Lq": median_value([r.get("expansion_Lq") for r in results]),
+                "expansion_mean": median_value(
+                    [r.get("expansion_mean") for r in results]
+                ),
+                "expansion_horizon": median_value(
+                    [r.get("expansion_horizon") for r in results]
+                ),
+                "growth_source": results[0].get("growth_source") if results else "",
+                "growth_horizon": median_value([r.get("growth_horizon") for r in results]),
+                "growth_Lq": median_value([r.get("growth_Lq") for r in results]),
+                "growth_Lmean": median_value([r.get("growth_Lmean") for r in results]),
+                "calibration_scale": median_value(
+                    [r.get("calibration_scale") for r in results]
+                ),
+                "horizon_model_cal": median_value(
+                    [r.get("horizon_model_cal") for r in results]
+                ),
                 "error_tolerance_used": median_value(
                     [r.get("error_tolerance_used") for r in results]
                 ),
@@ -416,8 +192,20 @@ def main():
             "horizon_real_time_med",
             "horizon_theory_time_med",
             "horizon_model_time_med",
+            "horizon_est_med",
+            "horizon_est_time_med",
             "model_error_med",
-            "expansion_Lq_med",
+            "model_error_mean_med",
+            "delta_local",
+            "delta_local_k",
+            "delta_local_quantile",
+            "delta_local_samples",
+            "growth_horizon_med",
+            "growth_Lq_med",
+            "growth_Lmean_med",
+            "growth_source",
+            "calibration_scale_med",
+            "horizon_model_cal_med",
             "selection_metric",
             "error_mode",
             "error_tol_used_med",
@@ -438,10 +226,22 @@ def main():
             "horizon_real_time",
             "horizon_theory_time",
             "horizon_model_time",
+            "horizon_est",
+            "horizon_est_time",
             "model_error",
             "model_error_mode",
-            "expansion_Lq",
+            "model_error_mean",
+            "delta_local",
+            "delta_local_k",
+            "delta_local_quantile",
+            "delta_local_samples",
+            "growth_horizon",
+            "growth_Lq",
+            "growth_Lmean",
+            "growth_source",
             "bound_mode",
+            "calibration_scale",
+            "horizon_model_cal",
             "selection_metric",
             "selection_horizon",
             "error_mode",

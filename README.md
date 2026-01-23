@@ -41,8 +41,26 @@ Probabilistic model-aware bound options (calibration + quantiles):
 ```
 ./venv/bin/python -m src.horizon_experiment \
   --calib-ratio 0.05 --delta-mode quantile --delta-quantile 0.95 \
-  --expansion-quantile 0.95 --expansion-samples 500
+  --expansion-quantile 0.95 --expansion-samples 500 --expansion-horizon 10 \
+  --calibrate-coverage --calibration-alpha 0.1
 ```
+
+The run reports three horizons:
+- `horizon_model`: probabilistic bound from quantile growth and residuals.
+- `horizon_est`: precision-focused estimate from mean growth and mean residuals.
+- `horizon_cal`: conservative bound after coverage calibration.
+
+Growth source options:
+- default: `--growth-source error` (uses model error growth).
+- fallback: `--growth-source state` (uses embedded state expansion).
+- experimental: `--growth-source jacobian` (uses local Jacobian norms).
+
+Local residual option:
+- `--delta-local` enables kNN-based local residual quantiles.
+
+Multi-step training:
+- `--train-multistep` enables teacher-forcing training with `--train-horizon`.
+- `--tf-start`, `--tf-end` set the linear schedule, `--tf-val` for validation.
 
 ## Outputs
 

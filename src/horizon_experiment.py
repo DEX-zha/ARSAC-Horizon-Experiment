@@ -8,468 +8,42 @@ import time
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import matplotlib.pyplot as plt
 
+from src.horizon_metrics import (
+    compute_calibration_residuals,
+    estimate_error_growth,
+    estimate_jacobian_growth,
+    estimate_local_delta,
+    estimate_model_error_from_residuals,
+    evaluate_mse,
+    horizon_from_lyapunov,
+    horizon_from_rmse,
+    rolling_rmse,
+    window_horizons,
+)
+from src.horizon_models import LinearAR, TorchSeqWrapper, TorchWrapper
+from src.horizon_plots import plot_log_divergence, plot_rmse
+from src.horizon_progress import ProgressBar
+from src.horizon_training import (
+    build_multistep_supervised,
+    train_lstm,
+    train_lstm_multistep,
+    train_mlp,
+    train_mlp_multistep,
+)
 from src.horizon_utils import (
     build_supervised,
-    estimate_lyapunov,
     estimate_expansion_quantile,
+    estimate_lyapunov,
     generate_logistic_map,
     generate_lorenz,
     generate_mackey_glass,
     generate_rossler,
-    horizon_from_model_bound,
     horizon_from_model_bound_by_growth,
     set_seed,
     split_series,
     standardize_series,
 )
-
-class ProgressBar:
-    """Simple progress bar with ETA."""
-
-    def __init__(self, total, label="progress"):
-        self.total = max(1, int(total))
-        self.label = label
-        self.start = time.time()
-        self.current = 0
-
-    def update(self, step=1, extra=""):
-        """Advances the progress bar and prints the current status."""
-        self.current = min(self.total, self.current + step)
-        frac = self.current / self.total
-        width = 24
-        filled = int(width * frac)
-        bar = "#" * filled + "-" * (width - filled)
-        elapsed = time.time() - self.start
-        rate = self.current / elapsed if elapsed > 0 else 0.0
-        eta = (self.total - self.current) / rate if rate > 0 else 0.0
-        msg = (
-            f"\r{self.label} [{bar}] {self.current}/{self.total} "
-            f"{frac*100:5.1f}% ETA {eta:5.1f}s {extra}"
-        )
-        print(msg, end="", flush=True)
-
-    def close(self):
-        """Ends the progress bar line."""
-        print()
-
-
-class LinearAR:
-    """Ridge-regularized linear auto-regressive predictor."""
-
-    def __init__(self, reg=1e-4):
-        self.reg = reg
-        self.weights = None
-
-    def fit(self, x, y):
-        """Fits the linear model parameters."""
-        x = np.asarray(x, dtype=np.float64)
-        y = np.asarray(y, dtype=np.float64)
-        ones = np.ones((x.shape[0], 1), dtype=np.float64)
-        x_aug = np.concatenate([x, ones], axis=1)
-        xtx = x_aug.T @ x_aug
-        xtx += self.reg * np.eye(xtx.shape[0], dtype=np.float64)
-        self.weights = np.linalg.solve(xtx, x_aug.T @ y)
-        return self
-
-    def predict(self, x):
-        """Predicts a single value from a feature vector."""
-        x = np.asarray(x, dtype=np.float64)
-        return float(np.dot(self.weights[:-1], x) + self.weights[-1])
-
-    def predict_batch(self, x):
-        """Predicts a batch of values from feature vectors."""
-        x = np.asarray(x, dtype=np.float64)
-        ones = np.ones((x.shape[0], 1), dtype=np.float64)
-        x_aug = np.concatenate([x, ones], axis=1)
-        return x_aug @ self.weights
-
-
-class MLPPredictor(nn.Module):
-    """Small MLP for one-step prediction."""
-
-    def __init__(self, input_dim, hidden_dim=64):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, x):
-        return self.net(x).squeeze(-1)
-
-
-class LSTMPredictor(nn.Module):
-    """Single-layer LSTM predictor for one-step forecasting."""
-
-    def __init__(self, hidden_dim=64, num_layers=1):
-        super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=1,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-        )
-        self.readout = nn.Linear(hidden_dim, 1)
-
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        last = out[:, -1, :]
-        return self.readout(last).squeeze(-1)
-
-
-class TorchWrapper:
-    """Wraps a torch model for numpy-friendly predict calls."""
-
-    def __init__(self, model, device):
-        self.model = model
-        self.device = device
-
-    def predict(self, x):
-        """Predicts one step for a single input vector."""
-        x_t = torch.tensor(x, dtype=torch.float32, device=self.device).unsqueeze(0)
-        with torch.no_grad():
-            return float(self.model(x_t).item())
-
-    def predict_batch(self, x):
-        """Predicts one step for a batch of input vectors."""
-        x_t = torch.tensor(x, dtype=torch.float32, device=self.device)
-        with torch.no_grad():
-            return self.model(x_t).cpu().numpy()
-
-
-class TorchSeqWrapper:
-    """Wraps sequence models expecting (batch, time, 1) inputs."""
-
-    def __init__(self, model, device):
-        self.model = model
-        self.device = device
-
-    def predict(self, x):
-        """Predicts one step for a single input vector."""
-        x_t = torch.tensor(x, dtype=torch.float32, device=self.device).view(1, -1, 1)
-        with torch.no_grad():
-            return float(self.model(x_t).item())
-
-    def predict_batch(self, x):
-        """Predicts one step for a batch of input vectors."""
-        x_t = torch.tensor(x, dtype=torch.float32, device=self.device)
-        x_t = x_t.view(x_t.shape[0], x_t.shape[1], 1)
-        with torch.no_grad():
-            return self.model(x_t).cpu().numpy()
-
-
-def train_mlp(
-    x_train,
-    y_train,
-    x_val,
-    y_val,
-    input_dim,
-    hidden_dim=64,
-    epochs=50,
-    lr=1e-3,
-    batch_size=64,
-    patience=10,
-    device="cpu",
-    show_progress=False,
-):
-    """Trains an MLP with early stopping.
-
-    Args:
-        x_train: Training inputs.
-        y_train: Training targets.
-        x_val: Validation inputs.
-        y_val: Validation targets.
-        input_dim: Input dimensionality.
-        hidden_dim: Hidden layer width.
-        epochs: Max epochs to train.
-        lr: Learning rate.
-        batch_size: Batch size.
-        patience: Early stopping patience.
-        device: Torch device string.
-        show_progress: Whether to show a progress bar.
-
-    Returns:
-        Tuple of (trained model, best validation loss).
-    """
-    model = MLPPredictor(input_dim=input_dim, hidden_dim=hidden_dim).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
-
-    train_ds = torch.utils.data.TensorDataset(
-        torch.tensor(x_train, dtype=torch.float32),
-        torch.tensor(y_train, dtype=torch.float32),
-    )
-    train_loader = torch.utils.data.DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True
-    )
-
-    best_val = float("inf")
-    best_state = None
-    wait = 0
-    progress = ProgressBar(epochs, label="train-mlp") if show_progress else None
-    for _ in range(epochs):
-        model.train()
-        for xb, yb in train_loader:
-            xb = xb.to(device)
-            yb = yb.to(device)
-            optimizer.zero_grad()
-            pred = model(xb)
-            loss = criterion(pred, yb)
-            loss.backward()
-            optimizer.step()
-
-        model.eval()
-        with torch.no_grad():
-            val_pred = model(torch.tensor(x_val, dtype=torch.float32, device=device))
-            val_loss = criterion(
-                val_pred, torch.tensor(y_val, dtype=torch.float32, device=device)
-            ).item()
-
-        if val_loss < best_val:
-            best_val = val_loss
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            wait = 0
-        else:
-            wait += 1
-            if wait >= patience:
-                if progress:
-                    progress.update(epochs - progress.current)
-                break
-        if progress:
-            progress.update(1, extra=f"val={val_loss:.4f}")
-
-    if progress:
-        progress.close()
-    if best_state is not None:
-        model.load_state_dict(best_state)
-    return model, best_val
-
-
-def train_lstm(
-    x_train,
-    y_train,
-    x_val,
-    y_val,
-    hidden_dim=64,
-    num_layers=1,
-    epochs=50,
-    lr=1e-3,
-    batch_size=64,
-    patience=10,
-    device="cpu",
-    show_progress=False,
-):
-    """Trains an LSTM with early stopping.
-
-    Args:
-        x_train: Training inputs.
-        y_train: Training targets.
-        x_val: Validation inputs.
-        y_val: Validation targets.
-        hidden_dim: Hidden size.
-        num_layers: LSTM layers.
-        epochs: Max epochs.
-        lr: Learning rate.
-        batch_size: Batch size.
-        patience: Early stopping patience.
-        device: Torch device string.
-        show_progress: Whether to show a progress bar.
-
-    Returns:
-        Tuple of (trained model, best validation loss).
-    """
-    model = LSTMPredictor(hidden_dim=hidden_dim, num_layers=num_layers).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
-
-    x_train_t = torch.tensor(x_train, dtype=torch.float32).view(-1, x_train.shape[1], 1)
-    y_train_t = torch.tensor(y_train, dtype=torch.float32)
-    train_ds = torch.utils.data.TensorDataset(x_train_t, y_train_t)
-    train_loader = torch.utils.data.DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True
-    )
-
-    best_val = float("inf")
-    best_state = None
-    wait = 0
-    progress = ProgressBar(epochs, label="train-lstm") if show_progress else None
-    for _ in range(epochs):
-        model.train()
-        for xb, yb in train_loader:
-            xb = xb.to(device)
-            yb = yb.to(device)
-            optimizer.zero_grad()
-            pred = model(xb)
-            loss = criterion(pred, yb)
-            loss.backward()
-            optimizer.step()
-
-        model.eval()
-        with torch.no_grad():
-            x_val_t = torch.tensor(x_val, dtype=torch.float32, device=device)
-            x_val_t = x_val_t.view(x_val_t.shape[0], x_val_t.shape[1], 1)
-            val_pred = model(x_val_t)
-            val_loss = criterion(
-                val_pred, torch.tensor(y_val, dtype=torch.float32, device=device)
-            ).item()
-
-        if val_loss < best_val:
-            best_val = val_loss
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            wait = 0
-        else:
-            wait += 1
-            if wait >= patience:
-                if progress:
-                    progress.update(epochs - progress.current)
-                break
-        if progress:
-            progress.update(1, extra=f"val={val_loss:.4f}")
-
-    if progress:
-        progress.close()
-    if best_state is not None:
-        model.load_state_dict(best_state)
-    return model, best_val
-
-
-def evaluate_mse(model, x, y, device="cpu"):
-    """Computes mean squared error for a model."""
-    if hasattr(model, "predict_batch"):
-        pred = model.predict_batch(x)
-        return float(np.mean((pred - y) ** 2))
-
-    model.eval()
-    with torch.no_grad():
-        x_t = torch.tensor(x, dtype=torch.float32, device=device)
-        y_t = torch.tensor(y, dtype=torch.float32, device=device)
-        pred = model(x_t)
-        return float(torch.mean((pred - y_t) ** 2).item())
-
-
-def estimate_model_error(
-    model, series_std, dim, lag, mode="quantile", quantile=0.95, scale=3.0
-):
-    """Estimates a probabilistic model error bound from one-step residuals."""
-    try:
-        x_calib, y_calib = build_supervised(series_std, dim, lag, horizon=1)
-    except ValueError:
-        return 0.0, "none"
-
-    if x_calib.size == 0:
-        return 0.0, "none"
-
-    if hasattr(model, "predict_batch"):
-        preds = model.predict_batch(x_calib)
-    else:
-        preds = np.array([model.predict(x) for x in x_calib], dtype=np.float64)
-
-    preds = np.asarray(preds, dtype=np.float64).reshape(-1)
-    residuals = np.abs(preds - y_calib)
-    if residuals.size == 0:
-        return 0.0, "none"
-
-    if mode == "max":
-        return float(np.max(residuals)), "max"
-    if mode == "mean_std":
-        delta = float(np.mean(residuals) + scale * np.std(residuals))
-        return delta, f"mean+{scale:.1f}std"
-    delta = float(np.quantile(residuals, quantile))
-    return delta, f"quantile@{quantile:.2f}"
-
-
-def rolling_rmse(model, series_std, dim, lag, horizon_max):
-    """Computes multi-step RMSE by rolling autoregression."""
-    series_std = np.asarray(series_std, dtype=np.float64)
-    window_len = (dim - 1) * lag + 1
-    n = len(series_std) - window_len - horizon_max
-    if n <= 0:
-        return np.full(horizon_max, np.nan, dtype=np.float64)
-
-    errors = np.zeros(horizon_max, dtype=np.float64)
-    count = np.zeros(horizon_max, dtype=np.float64)
-    for start in range(n):
-        history = list(series_std[start : start + window_len])
-        for h in range(horizon_max):
-            x = [history[i * lag] for i in range(dim)]
-            pred = model.predict(x)
-            true = series_std[start + (dim - 1) * lag + h + 1]
-            errors[h] += (pred - true) ** 2
-            count[h] += 1.0
-            history.append(pred)
-            history.pop(0)
-
-    rmse = np.sqrt(errors / np.maximum(count, 1.0))
-    return rmse
-
-
-def horizon_from_rmse(rmse, tolerance):
-    """Returns the first horizon where RMSE exceeds tolerance."""
-    for idx, value in enumerate(rmse, start=1):
-        if value >= tolerance:
-            return idx
-    return len(rmse)
-
-
-def horizon_from_lyapunov(lyapunov, init_err, tolerance):
-    """Estimates theoretical horizon from Lyapunov growth."""
-    if lyapunov <= 0 or init_err <= 0:
-        return float("inf")
-    if tolerance <= init_err:
-        return 0.0
-    return math.log(tolerance / init_err) / lyapunov
-
-
-def plot_rmse(rmse_by_h, horizon_real, horizon_theory, horizon_model, out_path):
-    """Saves RMSE vs horizon plot."""
-    x = np.arange(1, len(rmse_by_h) + 1, dtype=np.float64)
-    mask = np.isfinite(rmse_by_h)
-    plt.figure(figsize=(8, 4.5))
-    plt.plot(x[mask], rmse_by_h[mask], label="RMSE")
-    plt.axvline(horizon_real, color="tab:red", linestyle="--", label="H_real")
-    if math.isfinite(horizon_theory):
-        plt.axvline(horizon_theory, color="tab:green", linestyle="--", label="H_theory")
-    if horizon_model is not None and math.isfinite(horizon_model):
-        plt.axvline(
-            horizon_model,
-            color="tab:purple",
-            linestyle="--",
-            label="H_model",
-        )
-    plt.xlabel("Horizon (steps)")
-    plt.ylabel("RMSE")
-    plt.title("RMSE vs Horizon")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_path)
-    plt.close()
-
-
-def plot_log_divergence(rmse_by_h, lyap_step, out_path):
-    """Saves log-divergence plot with Lyapunov slope."""
-    eps = 1e-8
-    log_err = np.log(rmse_by_h + eps)
-    x = np.arange(len(log_err), dtype=np.float64)
-    mask = np.isfinite(log_err)
-    plt.figure(figsize=(8, 4.5))
-    plt.plot(x[mask], log_err[mask], label="log(RMSE)")
-    if np.isfinite(log_err[0]):
-        line = log_err[0] + lyap_step * x
-        plt.plot(x[mask], line[mask], label="Lyapunov slope")
-    plt.xlabel("Horizon (steps)")
-    plt.ylabel("log(RMSE)")
-    plt.title("Log Divergence vs Horizon")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_path)
-    plt.close()
 
 
 def get_series(args):
@@ -518,8 +92,18 @@ def select_embedding(args, train_series, val_series, dim_values, lag_values, dev
     for dim in dim_values:
         for lag in lag_values:
             try:
-                x_train, y_train = build_supervised(train_series, dim, lag, horizon=1)
-                x_val, y_val = build_supervised(val_series, dim, lag, horizon=1)
+                if args.train_multistep and args.model in ("mlp", "lstm"):
+                    x_train, y_train = build_multistep_supervised(
+                        train_series, dim, lag, horizon=args.train_horizon
+                    )
+                    x_val, y_val = build_multistep_supervised(
+                        val_series, dim, lag, horizon=args.train_horizon
+                    )
+                else:
+                    x_train, y_train = build_supervised(
+                        train_series, dim, lag, horizon=1
+                    )
+                    x_val, y_val = build_supervised(val_series, dim, lag, horizon=1)
             except ValueError:
                 if progress:
                     progress.update(1, extra=f"dim={dim} lag={lag}")
@@ -530,36 +114,74 @@ def select_embedding(args, train_series, val_series, dim_values, lag_values, dev
                 val_loss = evaluate_mse(model, x_val, y_val)
                 wrapped = model
             elif args.model == "mlp":
-                model, val_loss = train_mlp(
-                    x_train,
-                    y_train,
-                    x_val,
-                    y_val,
-                    input_dim=dim,
-                    hidden_dim=args.mlp_hidden,
-                    epochs=args.mlp_epochs,
-                    lr=args.mlp_lr,
-                    batch_size=args.mlp_batch,
-                    patience=args.mlp_patience,
-                    device=device,
-                    show_progress=False,
-                )
+                if args.train_multistep:
+                    model, val_loss = train_mlp_multistep(
+                        x_train,
+                        y_train,
+                        x_val,
+                        y_val,
+                        input_dim=dim,
+                        hidden_dim=args.mlp_hidden,
+                        epochs=args.mlp_epochs,
+                        lr=args.mlp_lr,
+                        batch_size=args.mlp_batch,
+                        patience=args.mlp_patience,
+                        tf_start=args.tf_start,
+                        tf_end=args.tf_end,
+                        tf_val=args.tf_val,
+                        device=device,
+                        show_progress=False,
+                    )
+                else:
+                    model, val_loss = train_mlp(
+                        x_train,
+                        y_train,
+                        x_val,
+                        y_val,
+                        input_dim=dim,
+                        hidden_dim=args.mlp_hidden,
+                        epochs=args.mlp_epochs,
+                        lr=args.mlp_lr,
+                        batch_size=args.mlp_batch,
+                        patience=args.mlp_patience,
+                        device=device,
+                        show_progress=False,
+                    )
                 wrapped = TorchWrapper(model, device)
             else:
-                model, val_loss = train_lstm(
-                    x_train,
-                    y_train,
-                    x_val,
-                    y_val,
-                    hidden_dim=args.lstm_hidden,
-                    num_layers=args.lstm_layers,
-                    epochs=args.lstm_epochs,
-                    lr=args.lstm_lr,
-                    batch_size=args.lstm_batch,
-                    patience=args.lstm_patience,
-                    device=device,
-                    show_progress=False,
-                )
+                if args.train_multistep:
+                    model, val_loss = train_lstm_multistep(
+                        x_train,
+                        y_train,
+                        x_val,
+                        y_val,
+                        hidden_dim=args.lstm_hidden,
+                        num_layers=args.lstm_layers,
+                        epochs=args.lstm_epochs,
+                        lr=args.lstm_lr,
+                        batch_size=args.lstm_batch,
+                        patience=args.lstm_patience,
+                        tf_start=args.tf_start,
+                        tf_end=args.tf_end,
+                        tf_val=args.tf_val,
+                        device=device,
+                        show_progress=False,
+                    )
+                else:
+                    model, val_loss = train_lstm(
+                        x_train,
+                        y_train,
+                        x_val,
+                        y_val,
+                        hidden_dim=args.lstm_hidden,
+                        num_layers=args.lstm_layers,
+                        epochs=args.lstm_epochs,
+                        lr=args.lstm_lr,
+                        batch_size=args.lstm_batch,
+                        patience=args.lstm_patience,
+                        device=device,
+                        show_progress=False,
+                    )
                 wrapped = TorchSeqWrapper(model, device)
 
             selection = {
@@ -648,41 +270,87 @@ def train_final_model(
 ):
     """Trains the final model on train+val with the chosen embedding."""
     merged = np.concatenate([train_series, val_series], axis=0)
-    x_train, y_train = build_supervised(merged, dim, lag, horizon=1)
-    x_val, y_val = build_supervised(val_series, dim, lag, horizon=1)
+    if args.train_multistep and args.model in ("mlp", "lstm"):
+        x_train, y_train = build_multistep_supervised(
+            merged, dim, lag, horizon=args.train_horizon
+        )
+        x_val, y_val = build_multistep_supervised(
+            val_series, dim, lag, horizon=args.train_horizon
+        )
+    else:
+        x_train, y_train = build_supervised(merged, dim, lag, horizon=1)
+        x_val, y_val = build_supervised(val_series, dim, lag, horizon=1)
     if args.model == "linear":
         model = LinearAR(reg=args.linear_reg).fit(x_train, y_train)
         return model
     if args.model == "mlp":
-        model, _ = train_mlp(
+        if args.train_multistep:
+            model, _ = train_mlp_multistep(
+                x_train,
+                y_train,
+                x_val,
+                y_val,
+                input_dim=dim,
+                hidden_dim=args.mlp_hidden,
+                epochs=args.mlp_epochs,
+                lr=args.mlp_lr,
+                batch_size=args.mlp_batch,
+                patience=args.mlp_patience,
+                tf_start=args.tf_start,
+                tf_end=args.tf_end,
+                tf_val=args.tf_val,
+                device=device,
+                show_progress=show_progress,
+            )
+        else:
+            model, _ = train_mlp(
+                x_train,
+                y_train,
+                x_val,
+                y_val,
+                input_dim=dim,
+                hidden_dim=args.mlp_hidden,
+                epochs=args.mlp_epochs,
+                lr=args.mlp_lr,
+                batch_size=args.mlp_batch,
+                patience=args.mlp_patience,
+                device=device,
+                show_progress=show_progress,
+            )
+        return TorchWrapper(model, device)
+    if args.train_multistep:
+        model, _ = train_lstm_multistep(
             x_train,
             y_train,
             x_val,
             y_val,
-            input_dim=dim,
-            hidden_dim=args.mlp_hidden,
-            epochs=args.mlp_epochs,
-            lr=args.mlp_lr,
-            batch_size=args.mlp_batch,
-            patience=args.mlp_patience,
+            hidden_dim=args.lstm_hidden,
+            num_layers=args.lstm_layers,
+            epochs=args.lstm_epochs,
+            lr=args.lstm_lr,
+            batch_size=args.lstm_batch,
+            patience=args.lstm_patience,
+            tf_start=args.tf_start,
+            tf_end=args.tf_end,
+            tf_val=args.tf_val,
             device=device,
             show_progress=show_progress,
         )
-        return TorchWrapper(model, device)
-    model, _ = train_lstm(
-        x_train,
-        y_train,
-        x_val,
-        y_val,
-        hidden_dim=args.lstm_hidden,
-        num_layers=args.lstm_layers,
-        epochs=args.lstm_epochs,
-        lr=args.lstm_lr,
-        batch_size=args.lstm_batch,
-        patience=args.lstm_patience,
-        device=device,
-        show_progress=show_progress,
-    )
+    else:
+        model, _ = train_lstm(
+            x_train,
+            y_train,
+            x_val,
+            y_val,
+            hidden_dim=args.lstm_hidden,
+            num_layers=args.lstm_layers,
+            epochs=args.lstm_epochs,
+            lr=args.lstm_lr,
+            batch_size=args.lstm_batch,
+            patience=args.lstm_patience,
+            device=device,
+            show_progress=show_progress,
+        )
     return TorchSeqWrapper(model, device)
 
 
@@ -759,19 +427,39 @@ def run_experiment(args):
     )
     horizon_real_time = horizon_real * dt
 
-    model_error, model_error_mode = estimate_model_error(
-        model,
-        calib_std,
-        best["dim"],
-        best["lag"],
-        mode=args.delta_mode,
-        quantile=args.delta_quantile,
-        scale=args.delta_scale,
+    x_calib, calib_residuals = compute_calibration_residuals(
+        model, calib_std, best["dim"], best["lag"]
     )
+    model_error, model_error_mode, model_error_mean = (
+        estimate_model_error_from_residuals(
+            calib_residuals,
+            mode=args.delta_mode,
+            quantile=args.delta_quantile,
+            scale=args.delta_scale,
+        )
+    )
+    delta_local_used = False
+    delta_local_quantile = args.delta_local_quantile
+    if delta_local_quantile is None:
+        delta_local_quantile = args.delta_quantile
+    if args.delta_local:
+        delta_local_q, delta_local_mean, _ = estimate_local_delta(
+            x_calib,
+            calib_residuals,
+            k=args.delta_local_k,
+            quantile=delta_local_quantile,
+            max_samples=args.delta_local_samples,
+            seed=args.seed,
+        )
+        if delta_local_q > 0.0:
+            model_error = delta_local_q
+            model_error_mean = delta_local_mean
+            model_error_mode = f"local@{delta_local_quantile:.2f}"
+            delta_local_used = True
     exp_dim = args.expansion_dim if args.expansion_dim is not None else lyap_dim
     exp_lag = args.expansion_lag if args.expansion_lag is not None else lyap_lag
     exp_series = np.concatenate([train_std, val_std], axis=0)
-    expansion_q, _ = estimate_expansion_quantile(
+    expansion_q, expansion_ratios = estimate_expansion_quantile(
         exp_series,
         dim=exp_dim,
         lag=exp_lag,
@@ -779,13 +467,106 @@ def run_experiment(args):
         theiler=args.expansion_theiler,
         max_pairs=args.expansion_samples,
         seed=args.seed,
+        horizon=args.expansion_horizon,
     )
+    expansion_mean = 1.0
+    if expansion_ratios.size:
+        positive = expansion_ratios[expansion_ratios > 0]
+        if positive.size:
+            expansion_mean = float(np.exp(np.mean(np.log(positive))))
+    calib_series = calib_std if calib_std.size else val_std
+    growth_source = args.growth_source
+    growth_horizon = args.expansion_horizon
+    growth_q = expansion_q
+    growth_mean = expansion_mean
+    if growth_source == "error":
+        growth_q, growth_mean, _ = estimate_error_growth(
+            model,
+            calib_series,
+            best["dim"],
+            best["lag"],
+            horizon=growth_horizon,
+            max_windows=args.expansion_samples,
+            quantile=args.expansion_quantile,
+            seed=args.seed,
+        )
+    elif growth_source == "jacobian":
+        growth_q, growth_mean, _ = estimate_jacobian_growth(
+            model,
+            x_calib,
+            quantile=args.expansion_quantile,
+            max_samples=args.expansion_samples,
+            seed=args.seed,
+        )
+        if x_calib.size == 0:
+            growth_q = expansion_q
+            growth_mean = expansion_mean
+
     horizon_model_steps = horizon_from_model_bound_by_growth(
-        expansion_q, base_err, model_error, tolerance
+        growth_q, base_err, model_error, tolerance
     )
     horizon_model_time = (
         horizon_model_steps * dt if math.isfinite(horizon_model_steps) else float("inf")
     )
+    horizon_est_steps = horizon_from_model_bound_by_growth(
+        growth_mean, base_err, model_error_mean, tolerance
+    )
+    horizon_est_time = (
+        horizon_est_steps * dt if math.isfinite(horizon_est_steps) else float("inf")
+    )
+    rmse_calib = rolling_rmse(
+        model, calib_series, best["dim"], best["lag"], args.horizon_max
+    )
+    base_err_calib = rmse_calib[0] if rmse_calib.size > 0 else 0.0
+    if args.error_mode == "relative":
+        tolerance_calib = base_err_calib * args.error_factor
+    else:
+        tolerance_calib = args.error_tolerance
+
+    calib_horizons, calib_init_errs = window_horizons(
+        model,
+        calib_series,
+        best["dim"],
+        best["lag"],
+        args.horizon_max,
+        tolerance_calib,
+    )
+    ratios = []
+    for h_real, init_err in zip(calib_horizons, calib_init_errs):
+        if init_err is None:
+            continue
+        h_model = horizon_from_model_bound_by_growth(
+            growth_q, init_err, model_error, tolerance_calib
+        )
+        if h_model <= 0:
+            continue
+        ratios.append(h_real / h_model)
+
+    if args.calibrate_coverage and ratios:
+        scale = float(np.quantile(ratios, 1.0 - args.calibration_alpha))
+        if scale < args.calibration_floor:
+            scale = args.calibration_floor
+    else:
+        scale = 1.0
+
+    horizon_model_cal = horizon_model_steps * scale
+    horizon_model_cal_time = (
+        horizon_model_cal * dt if math.isfinite(horizon_model_cal) else float("inf")
+    )
+    coverage = None
+    if ratios:
+        hits = 0
+        total = 0
+        for h_real, init_err in zip(calib_horizons, calib_init_errs):
+            h_model = horizon_from_model_bound_by_growth(
+                growth_q, init_err, model_error, tolerance_calib
+            )
+            if h_model <= 0:
+                continue
+            total += 1
+            if h_model * scale >= h_real:
+                hits += 1
+        coverage = hits / total if total > 0 else None
 
     os.makedirs(args.output_dir, exist_ok=True)
     csv_name = "horizon_results.csv"
@@ -814,15 +595,35 @@ def run_experiment(args):
         "calib_ratio",
         "model_error",
         "model_error_mode",
+        "model_error_mean",
+        "delta_local",
+        "delta_local_k",
+        "delta_local_quantile",
+        "delta_local_samples",
         "horizon_model",
         "horizon_model_time",
+        "horizon_est",
+        "horizon_est_time",
         "expansion_quantile",
         "expansion_samples",
         "expansion_theiler",
         "expansion_dim",
         "expansion_lag",
+        "expansion_horizon",
         "expansion_Lq",
+        "expansion_mean",
+        "growth_source",
+        "growth_horizon",
+        "growth_Lq",
+        "growth_Lmean",
         "bound_mode",
+        "calibration_alpha",
+        "calibration_floor",
+        "calibration_scale",
+        "calibration_samples",
+        "calibration_coverage",
+        "horizon_model_cal",
+        "horizon_model_cal_time",
     ]
 
     if os.path.exists(csv_path):
@@ -875,19 +676,47 @@ def run_experiment(args):
                 f"{args.calib_ratio:.3f}",
                 f"{model_error:.6f}",
                 model_error_mode,
+                f"{model_error_mean:.6f}",
+                str(delta_local_used),
+                args.delta_local_k,
+                f"{delta_local_quantile:.3f}",
+                args.delta_local_samples,
                 f"{horizon_model_steps:.3f}"
                 if math.isfinite(horizon_model_steps)
                 else "inf",
                 f"{horizon_model_time:.3f}"
                 if math.isfinite(horizon_model_time)
                 else "inf",
+                f"{horizon_est_steps:.3f}"
+                if math.isfinite(horizon_est_steps)
+                else "inf",
+                f"{horizon_est_time:.3f}"
+                if math.isfinite(horizon_est_time)
+                else "inf",
                 f"{args.expansion_quantile:.3f}",
                 args.expansion_samples,
                 args.expansion_theiler,
                 exp_dim,
                 exp_lag,
+                args.expansion_horizon,
                 f"{expansion_q:.6f}",
+                f"{expansion_mean:.6f}",
+                growth_source,
+                growth_horizon,
+                f"{growth_q:.6f}",
+                f"{growth_mean:.6f}",
                 "probabilistic",
+                f"{args.calibration_alpha:.3f}",
+                f"{args.calibration_floor:.3f}",
+                f"{scale:.6f}",
+                len(ratios),
+                f"{coverage:.3f}" if coverage is not None else "",
+                f"{horizon_model_cal:.3f}"
+                if math.isfinite(horizon_model_cal)
+                else "inf",
+                f"{horizon_model_cal_time:.3f}"
+                if math.isfinite(horizon_model_cal_time)
+                else "inf",
             ]
         )
 
@@ -895,7 +724,13 @@ def run_experiment(args):
         rmse_path = os.path.join(args.output_dir, f"{args.plot_prefix}_rmse.png")
         log_path = os.path.join(args.output_dir, f"{args.plot_prefix}_log.png")
         plot_rmse(
-            rmse_by_h, horizon_real, horizon_theory_steps, horizon_model_steps, rmse_path
+            rmse_by_h,
+            horizon_real,
+            horizon_theory_steps,
+            horizon_model_steps,
+            horizon_model_cal,
+            horizon_est_steps,
+            rmse_path,
         )
         plot_log_divergence(rmse_by_h, lyap_step, log_path)
         print(f"Plots saved to {rmse_path} and {log_path}")
@@ -910,7 +745,12 @@ def run_experiment(args):
         f"horizon_real={horizon_real} horizon_real_time={horizon_real_time:.2f} "
         f"horizon_theory={horizon_theory_steps:.2f} horizon_theory_time={horizon_theory_time:.2f} "
         f"horizon_model={horizon_model_steps:.2f} horizon_model_time={horizon_model_time:.2f} "
-        f"delta={model_error:.4f} Lq={expansion_q:.4f} tol={tolerance:.6f}"
+        f"horizon_cal={horizon_model_cal:.2f} horizon_cal_time={horizon_model_cal_time:.2f} "
+        f"horizon_est={horizon_est_steps:.2f} horizon_est_time={horizon_est_time:.2f} "
+        f"delta={model_error:.4f} delta_mean={model_error_mean:.4f} "
+        f"Lq={growth_q:.4f} Lmean={growth_mean:.4f} k={growth_horizon} "
+        f"growth={growth_source} "
+        f"scale={scale:.3f} tol={tolerance:.6f}"
         f"{selection_note} elapsed={elapsed:.1f}s"
     )
     return {
@@ -928,16 +768,36 @@ def run_experiment(args):
         "horizon_theory_time": horizon_theory_time,
         "horizon_model": horizon_model_steps,
         "horizon_model_time": horizon_model_time,
+        "horizon_est": horizon_est_steps,
+        "horizon_est_time": horizon_est_time,
         "model_error": model_error,
         "model_error_mode": model_error_mode,
+        "model_error_mean": model_error_mean,
+        "delta_local": delta_local_used,
+        "delta_local_k": args.delta_local_k,
+        "delta_local_quantile": delta_local_quantile,
+        "delta_local_samples": args.delta_local_samples,
         "calib_ratio": args.calib_ratio,
         "expansion_quantile": args.expansion_quantile,
         "expansion_samples": args.expansion_samples,
         "expansion_theiler": args.expansion_theiler,
         "expansion_dim": exp_dim,
         "expansion_lag": exp_lag,
+        "expansion_horizon": args.expansion_horizon,
         "expansion_Lq": expansion_q,
+        "expansion_mean": expansion_mean,
+        "growth_source": growth_source,
+        "growth_horizon": growth_horizon,
+        "growth_Lq": growth_q,
+        "growth_Lmean": growth_mean,
         "bound_mode": "probabilistic",
+        "calibration_alpha": args.calibration_alpha,
+        "calibration_floor": args.calibration_floor,
+        "calibration_scale": scale,
+        "calibration_samples": len(ratios),
+        "calibration_coverage": coverage,
+        "horizon_model_cal": horizon_model_cal,
+        "horizon_model_cal_time": horizon_model_cal_time,
         "error_tolerance_used": tolerance,
         "selection_metric": args.selection_metric,
         "selection_horizon": best["selection"]["horizon"]
@@ -979,6 +839,11 @@ def build_parser(add_help=True):
     parser.add_argument("--mlp-lr", type=float, default=1e-3)
     parser.add_argument("--mlp-batch", type=int, default=64)
     parser.add_argument("--mlp-patience", type=int, default=12)
+    parser.add_argument("--train-multistep", action="store_true")
+    parser.add_argument("--train-horizon", type=int, default=5)
+    parser.add_argument("--tf-start", type=float, default=1.0)
+    parser.add_argument("--tf-end", type=float, default=0.2)
+    parser.add_argument("--tf-val", type=float, default=0.0)
 
     parser.add_argument("--lstm-hidden", type=int, default=64)
     parser.add_argument("--lstm-layers", type=int, default=1)
@@ -1011,11 +876,25 @@ def build_parser(add_help=True):
     )
     parser.add_argument("--delta-quantile", type=float, default=0.95)
     parser.add_argument("--delta-scale", type=float, default=3.0)
+    parser.add_argument("--delta-local", action="store_true")
+    parser.add_argument("--delta-local-k", type=int, default=20)
+    parser.add_argument("--delta-local-quantile", type=float, default=None)
+    parser.add_argument("--delta-local-samples", type=int, default=500)
+    parser.add_argument(
+        "--growth-source",
+        type=str,
+        choices=["state", "error", "jacobian"],
+        default="error",
+    )
     parser.add_argument("--expansion-quantile", type=float, default=0.95)
     parser.add_argument("--expansion-samples", type=int, default=500)
     parser.add_argument("--expansion-theiler", type=int, default=10)
     parser.add_argument("--expansion-dim", type=int, default=None)
     parser.add_argument("--expansion-lag", type=int, default=None)
+    parser.add_argument("--expansion-horizon", type=int, default=10)
+    parser.add_argument("--calibrate-coverage", action="store_true")
+    parser.add_argument("--calibration-alpha", type=float, default=0.1)
+    parser.add_argument("--calibration-floor", type=float, default=1.0)
 
     parser.add_argument("--lyap-max-t", type=int, default=25)
     parser.add_argument("--lyap-theiler", type=int, default=10)
