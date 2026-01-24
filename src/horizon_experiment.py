@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from src.horizon_metrics import (
+    build_horizon_dataset,
     compute_calibration_residuals,
     estimate_error_growth,
     estimate_jacobian_growth,
@@ -30,6 +31,7 @@ from src.horizon_training import (
     train_lstm_multistep,
     train_mlp,
     train_mlp_multistep,
+    train_quantile_mlp,
 )
 from src.horizon_utils import (
     build_supervised,
@@ -356,6 +358,35 @@ def train_final_model(
 
 def run_experiment(args):
     """Runs a full horizon experiment and writes summary CSV output."""
+    def conformal_margin(scores, alpha):
+        scores = np.asarray(scores, dtype=np.float64)
+        scores = scores[np.isfinite(scores)]
+        if scores.size == 0:
+            return 0.0
+        n = scores.size
+        rank = int(math.ceil((n + 1) * (1.0 - alpha))) - 1
+        rank = max(0, min(rank, n - 1))
+        sorted_scores = np.sort(scores)
+        return float(sorted_scores[rank])
+
+    def assign_conformal_bins(preds, jac_norms, bins, feature):
+        preds = np.asarray(preds, dtype=np.float64)
+        jac_norms = np.asarray(jac_norms, dtype=np.float64)
+        if bins <= 1:
+            return np.zeros(preds.shape[0], dtype=np.int64), None
+        quantiles = np.linspace(0.0, 1.0, bins + 1)
+        pred_edges = np.quantile(preds, quantiles)
+        pred_edges[0] = -np.inf
+        pred_edges[-1] = np.inf
+        pred_bins = np.digitize(preds, pred_edges[1:-1], right=False)
+        if feature != "pred_jacobian":
+            return pred_bins, (pred_edges,)
+        jac_edges = np.quantile(jac_norms, quantiles)
+        jac_edges[0] = -np.inf
+        jac_edges[-1] = np.inf
+        jac_bins = np.digitize(jac_norms, jac_edges[1:-1], right=False)
+        return pred_bins * bins + jac_bins, (pred_edges, jac_edges)
+
     set_seed(args.seed)
     device = torch.device("cuda" if args.use_cuda and torch.cuda.is_available() else "cpu")
     series = get_series(args)
@@ -405,6 +436,8 @@ def run_experiment(args):
     else:
         tolerance = args.error_tolerance
     horizon_real = horizon_from_rmse(rmse_by_h, tolerance)
+    horizon_window_median = None
+    horizon_window_mean = None
 
     lyap_dim = args.lyap_dim if args.lyap_dim is not None else best["dim"]
     lyap_lag = args.lyap_lag if args.lyap_lag is not None else best["lag"]
@@ -427,146 +460,326 @@ def run_experiment(args):
     )
     horizon_real_time = horizon_real * dt
 
-    x_calib, calib_residuals = compute_calibration_residuals(
-        model, calib_std, best["dim"], best["lag"]
-    )
-    model_error, model_error_mode, model_error_mean = (
-        estimate_model_error_from_residuals(
-            calib_residuals,
-            mode=args.delta_mode,
-            quantile=args.delta_quantile,
-            scale=args.delta_scale,
-        )
-    )
-    delta_local_used = False
+    calib_series = calib_std if calib_std.size else val_std
     delta_local_quantile = args.delta_local_quantile
     if delta_local_quantile is None:
         delta_local_quantile = args.delta_quantile
-    if args.delta_local:
-        delta_local_q, delta_local_mean, _ = estimate_local_delta(
-            x_calib,
-            calib_residuals,
-            k=args.delta_local_k,
-            quantile=delta_local_quantile,
-            max_samples=args.delta_local_samples,
-            seed=args.seed,
-        )
-        if delta_local_q > 0.0:
-            model_error = delta_local_q
-            model_error_mean = delta_local_mean
-            model_error_mode = f"local@{delta_local_quantile:.2f}"
-            delta_local_used = True
-    exp_dim = args.expansion_dim if args.expansion_dim is not None else lyap_dim
-    exp_lag = args.expansion_lag if args.expansion_lag is not None else lyap_lag
-    exp_series = np.concatenate([train_std, val_std], axis=0)
-    expansion_q, expansion_ratios = estimate_expansion_quantile(
-        exp_series,
-        dim=exp_dim,
-        lag=exp_lag,
-        quantile=args.expansion_quantile,
-        theiler=args.expansion_theiler,
-        max_pairs=args.expansion_samples,
-        seed=args.seed,
-        horizon=args.expansion_horizon,
-    )
-    expansion_mean = 1.0
-    if expansion_ratios.size:
-        positive = expansion_ratios[expansion_ratios > 0]
-        if positive.size:
-            expansion_mean = float(np.exp(np.mean(np.log(positive))))
-    calib_series = calib_std if calib_std.size else val_std
+
+    bound_mode = args.bound_mode
+    model_error = 0.0
+    model_error_mode = "none"
+    model_error_mean = 0.0
+    delta_local_used = False
     growth_source = args.growth_source
     growth_horizon = args.expansion_horizon
-    growth_q = expansion_q
-    growth_mean = expansion_mean
-    if growth_source == "error":
-        growth_q, growth_mean, _ = estimate_error_growth(
+    growth_q = 1.0
+    growth_mean = 1.0
+    exp_dim = args.expansion_dim if args.expansion_dim is not None else lyap_dim
+    exp_lag = args.expansion_lag if args.expansion_lag is not None else lyap_lag
+    expansion_q = 1.0
+    expansion_mean = 1.0
+    scale = 1.0
+    coverage = None
+    calibration_samples = 0
+    horizon_model_steps = 0.0
+    horizon_model_time = 0.0
+    horizon_est_steps = 0.0
+    horizon_est_time = 0.0
+    horizon_model_cal = 0.0
+    horizon_model_cal_time = 0.0
+
+    if bound_mode == "horizon_conformal":
+        x_train, y_train = build_horizon_dataset(
+            model,
+            train_std,
+            best["dim"],
+            best["lag"],
+            args.horizon_max,
+            tolerance,
+            max_windows=args.horizon_samples,
+            seed=args.seed,
+            use_jacobian=args.horizon_use_jacobian,
+        )
+        x_val, y_val = build_horizon_dataset(
+            model,
+            val_std,
+            best["dim"],
+            best["lag"],
+            args.horizon_max,
+            tolerance,
+            max_windows=args.horizon_samples,
+            seed=args.seed + 1,
+            use_jacobian=args.horizon_use_jacobian,
+        )
+        x_calib_h, y_calib_h = build_horizon_dataset(
             model,
             calib_series,
             best["dim"],
             best["lag"],
-            horizon=growth_horizon,
-            max_windows=args.expansion_samples,
-            quantile=args.expansion_quantile,
-            seed=args.seed,
+            args.horizon_max,
+            tolerance,
+            max_windows=args.horizon_samples,
+            seed=args.seed + 2,
+            use_jacobian=args.horizon_use_jacobian,
         )
-    elif growth_source == "jacobian":
-        growth_q, growth_mean, _ = estimate_jacobian_growth(
+        x_test_h, y_test_h = build_horizon_dataset(
             model,
-            x_calib,
+            test_std,
+            best["dim"],
+            best["lag"],
+            args.horizon_max,
+            tolerance,
+            max_windows=args.horizon_samples,
+            seed=args.seed + 3,
+            use_jacobian=args.horizon_use_jacobian,
+        )
+
+        if x_train.size == 0:
+            raise RuntimeError("Not enough data for conformal horizon training.")
+
+        x_calib_raw = x_calib_h
+        x_test_raw = x_test_h
+        feat_mean = np.mean(x_train, axis=0)
+        feat_std = np.std(x_train, axis=0)
+        feat_std[feat_std == 0.0] = 1.0
+        x_train = (x_train - feat_mean) / feat_std
+        x_val = (x_val - feat_mean) / feat_std if x_val.size else x_val
+        x_calib_h = (x_calib_h - feat_mean) / feat_std if x_calib_h.size else x_calib_h
+        x_test_h = (x_test_h - feat_mean) / feat_std if x_test_h.size else x_test_h
+
+        quantile = args.horizon_quantile
+        if quantile is None:
+            quantile = 1.0 - args.calibration_alpha
+        horizon_model, _ = train_quantile_mlp(
+            x_train,
+            y_train,
+            x_val,
+            y_val,
+            input_dim=x_train.shape[1],
+            quantile=quantile,
+            hidden_dim=args.mlp_hidden,
+            epochs=args.mlp_epochs,
+            lr=args.mlp_lr,
+            batch_size=args.mlp_batch,
+            patience=args.mlp_patience,
+            device=device,
+            show_progress=args.progress,
+        )
+        horizon_wrapper = TorchWrapper(horizon_model, device)
+
+        margin = 0.0
+        margin_global = 0.0
+        margin_by_bin = {}
+        if x_calib_h.size:
+            pred_calib = horizon_wrapper.predict_batch(x_calib_h).reshape(-1)
+            pred_calib = np.clip(pred_calib, 1.0, float(args.horizon_max))
+            jac_calib = (
+                x_calib_raw[:, -1]
+                if x_calib_raw.size and args.horizon_use_jacobian
+                else np.zeros_like(pred_calib)
+            )
+            scores = y_calib_h - pred_calib
+            margin_global = conformal_margin(scores, args.calibration_alpha)
+            bin_ids, _ = assign_conformal_bins(
+                pred_calib,
+                jac_calib,
+                args.conformal_bins,
+                args.conformal_feature,
+            )
+            for bin_id in np.unique(bin_ids):
+                bin_scores = scores[bin_ids == bin_id]
+                if bin_scores.size >= args.conformal_min_bin:
+                    margin_by_bin[int(bin_id)] = conformal_margin(
+                        bin_scores, args.calibration_alpha
+                    )
+            margins = np.array(
+                [margin_by_bin.get(int(b), margin_global) for b in bin_ids],
+                dtype=np.float64,
+            )
+            margin = float(np.median(margins)) if margins.size else margin_global
+            calibration_samples = int(len(y_calib_h))
+            coverage = float(np.mean(pred_calib + margins >= y_calib_h))
+
+        if x_test_h.size:
+            pred_test = horizon_wrapper.predict_batch(x_test_h).reshape(-1)
+            pred_test = np.clip(pred_test, 1.0, float(args.horizon_max))
+            jac_test = (
+                x_test_raw[:, -1]
+                if x_test_raw.size and args.horizon_use_jacobian
+                else np.zeros_like(pred_test)
+            )
+            test_bin_ids, _ = assign_conformal_bins(
+                pred_test,
+                jac_test,
+                args.conformal_bins,
+                args.conformal_feature,
+            )
+            test_margins = np.array(
+                [margin_by_bin.get(int(b), margin_global) for b in test_bin_ids],
+                dtype=np.float64,
+            )
+            pred_test_cal = np.clip(
+                pred_test + test_margins, 1.0, float(args.horizon_max)
+            )
+            horizon_model_steps = float(np.median(pred_test))
+            horizon_est_steps = float(np.mean(pred_test))
+            horizon_model_cal = float(np.median(pred_test_cal))
+        if y_test_h.size:
+            horizon_window_median = float(np.median(y_test_h))
+            horizon_window_mean = float(np.mean(y_test_h))
+
+        horizon_model_time = (
+            horizon_model_steps * dt
+            if math.isfinite(horizon_model_steps)
+            else float("inf")
+        )
+        horizon_est_time = (
+            horizon_est_steps * dt if math.isfinite(horizon_est_steps) else float("inf")
+        )
+        horizon_model_cal_time = (
+            horizon_model_cal * dt
+            if math.isfinite(horizon_model_cal)
+            else float("inf")
+        )
+        model_error_mode = "conformal"
+        scale = margin
+        growth_source = "conformal"
+    else:
+        x_calib, calib_residuals = compute_calibration_residuals(
+            model, calib_std, best["dim"], best["lag"]
+        )
+        model_error, model_error_mode, model_error_mean = (
+            estimate_model_error_from_residuals(
+                calib_residuals,
+                mode=args.delta_mode,
+                quantile=args.delta_quantile,
+                scale=args.delta_scale,
+            )
+        )
+        if args.delta_local:
+            delta_local_q, delta_local_mean, _ = estimate_local_delta(
+                x_calib,
+                calib_residuals,
+                k=args.delta_local_k,
+                quantile=delta_local_quantile,
+                max_samples=args.delta_local_samples,
+                seed=args.seed,
+            )
+            if delta_local_q > 0.0:
+                model_error = delta_local_q
+                model_error_mean = delta_local_mean
+                model_error_mode = f"local@{delta_local_quantile:.2f}"
+                delta_local_used = True
+        exp_series = np.concatenate([train_std, val_std], axis=0)
+        expansion_q, expansion_ratios = estimate_expansion_quantile(
+            exp_series,
+            dim=exp_dim,
+            lag=exp_lag,
             quantile=args.expansion_quantile,
-            max_samples=args.expansion_samples,
+            theiler=args.expansion_theiler,
+            max_pairs=args.expansion_samples,
             seed=args.seed,
+            horizon=args.expansion_horizon,
         )
-        if x_calib.size == 0:
-            growth_q = expansion_q
-            growth_mean = expansion_mean
+        expansion_mean = 1.0
+        if expansion_ratios.size:
+            positive = expansion_ratios[expansion_ratios > 0]
+            if positive.size:
+                expansion_mean = float(np.exp(np.mean(np.log(positive))))
+        growth_q = expansion_q
+        growth_mean = expansion_mean
+        if growth_source == "error":
+            growth_q, growth_mean, _ = estimate_error_growth(
+                model,
+                calib_series,
+                best["dim"],
+                best["lag"],
+                horizon=growth_horizon,
+                max_windows=args.expansion_samples,
+                quantile=args.expansion_quantile,
+                seed=args.seed,
+            )
+        elif growth_source == "jacobian":
+            growth_q, growth_mean, _ = estimate_jacobian_growth(
+                model,
+                x_calib,
+                quantile=args.expansion_quantile,
+                max_samples=args.expansion_samples,
+                seed=args.seed,
+            )
+            if x_calib.size == 0:
+                growth_q = expansion_q
+                growth_mean = expansion_mean
 
-    horizon_model_steps = horizon_from_model_bound_by_growth(
-        growth_q, base_err, model_error, tolerance
-    )
-    horizon_model_time = (
-        horizon_model_steps * dt if math.isfinite(horizon_model_steps) else float("inf")
-    )
-    horizon_est_steps = horizon_from_model_bound_by_growth(
-        growth_mean, base_err, model_error_mean, tolerance
-    )
-    horizon_est_time = (
-        horizon_est_steps * dt if math.isfinite(horizon_est_steps) else float("inf")
-    )
-    rmse_calib = rolling_rmse(
-        model, calib_series, best["dim"], best["lag"], args.horizon_max
-    )
-    base_err_calib = rmse_calib[0] if rmse_calib.size > 0 else 0.0
-    if args.error_mode == "relative":
-        tolerance_calib = base_err_calib * args.error_factor
-    else:
-        tolerance_calib = args.error_tolerance
-
-    calib_horizons, calib_init_errs = window_horizons(
-        model,
-        calib_series,
-        best["dim"],
-        best["lag"],
-        args.horizon_max,
-        tolerance_calib,
-    )
-    ratios = []
-    for h_real, init_err in zip(calib_horizons, calib_init_errs):
-        if init_err is None:
-            continue
-        h_model = horizon_from_model_bound_by_growth(
-            growth_q, init_err, model_error, tolerance_calib
+        horizon_model_steps = horizon_from_model_bound_by_growth(
+            growth_q, base_err, model_error, tolerance
         )
-        if h_model <= 0:
-            continue
-        ratios.append(h_real / h_model)
+        horizon_model_time = (
+            horizon_model_steps * dt
+            if math.isfinite(horizon_model_steps)
+            else float("inf")
+        )
+        horizon_est_steps = horizon_from_model_bound_by_growth(
+            growth_mean, base_err, model_error_mean, tolerance
+        )
+        horizon_est_time = (
+            horizon_est_steps * dt if math.isfinite(horizon_est_steps) else float("inf")
+        )
+        rmse_calib = rolling_rmse(
+            model, calib_series, best["dim"], best["lag"], args.horizon_max
+        )
+        base_err_calib = rmse_calib[0] if rmse_calib.size > 0 else 0.0
+        if args.error_mode == "relative":
+            tolerance_calib = base_err_calib * args.error_factor
+        else:
+            tolerance_calib = args.error_tolerance
 
-    if args.calibrate_coverage and ratios:
-        scale = float(np.quantile(ratios, 1.0 - args.calibration_alpha))
-        if scale < args.calibration_floor:
-            scale = args.calibration_floor
-    else:
-        scale = 1.0
-
-    horizon_model_cal = horizon_model_steps * scale
-    horizon_model_cal_time = (
-        horizon_model_cal * dt if math.isfinite(horizon_model_cal) else float("inf")
-    )
-    coverage = None
-    if ratios:
-        hits = 0
-        total = 0
+        calib_horizons, calib_init_errs = window_horizons(
+            model,
+            calib_series,
+            best["dim"],
+            best["lag"],
+            args.horizon_max,
+            tolerance_calib,
+        )
+        ratios = []
         for h_real, init_err in zip(calib_horizons, calib_init_errs):
+            if init_err is None:
+                continue
             h_model = horizon_from_model_bound_by_growth(
                 growth_q, init_err, model_error, tolerance_calib
             )
             if h_model <= 0:
                 continue
-            total += 1
-            if h_model * scale >= h_real:
-                hits += 1
-        coverage = hits / total if total > 0 else None
+            ratios.append(h_real / h_model)
+
+        if args.calibrate_coverage and ratios:
+            scale = float(np.quantile(ratios, 1.0 - args.calibration_alpha))
+            if scale < args.calibration_floor:
+                scale = args.calibration_floor
+        else:
+            scale = 1.0
+
+        horizon_model_cal = horizon_model_steps * scale
+        horizon_model_cal_time = (
+            horizon_model_cal * dt
+            if math.isfinite(horizon_model_cal)
+            else float("inf")
+        )
+        if ratios:
+            hits = 0
+            total = 0
+            for h_real, init_err in zip(calib_horizons, calib_init_errs):
+                h_model = horizon_from_model_bound_by_growth(
+                    growth_q, init_err, model_error, tolerance_calib
+                )
+                if h_model <= 0:
+                    continue
+                total += 1
+                if h_model * scale >= h_real:
+                    hits += 1
+            coverage = hits / total if total > 0 else None
+            calibration_samples = total
 
     os.makedirs(args.output_dir, exist_ok=True)
     csv_name = "horizon_results.csv"
@@ -586,6 +799,8 @@ def run_experiment(args):
         "lyapunov_lag",
         "horizon_real",
         "horizon_real_time",
+        "horizon_real_window_median",
+        "horizon_real_window_mean",
         "horizon_theory",
         "horizon_theory_time",
         "error_mode",
@@ -663,6 +878,12 @@ def run_experiment(args):
                 lyap_lag,
                 horizon_real,
                 f"{horizon_real_time:.3f}",
+                f"{horizon_window_median:.3f}"
+                if horizon_window_median is not None
+                else "",
+                f"{horizon_window_mean:.3f}"
+                if horizon_window_mean is not None
+                else "",
                 f"{horizon_theory_steps:.3f}"
                 if math.isfinite(horizon_theory_steps)
                 else "inf",
@@ -705,11 +926,11 @@ def run_experiment(args):
                 growth_horizon,
                 f"{growth_q:.6f}",
                 f"{growth_mean:.6f}",
-                "probabilistic",
+                bound_mode,
                 f"{args.calibration_alpha:.3f}",
                 f"{args.calibration_floor:.3f}",
                 f"{scale:.6f}",
-                len(ratios),
+                calibration_samples,
                 f"{coverage:.3f}" if coverage is not None else "",
                 f"{horizon_model_cal:.3f}"
                 if math.isfinite(horizon_model_cal)
@@ -739,6 +960,12 @@ def run_experiment(args):
     selection_note = ""
     if best.get("selection") and best["selection"]["horizon"] is not None:
         selection_note = f" sel_h={best['selection']['horizon']}"
+    window_note = ""
+    if horizon_window_median is not None and horizon_window_mean is not None:
+        window_note = (
+            f" h_win_med={horizon_window_median:.2f}"
+            f" h_win_mean={horizon_window_mean:.2f}"
+        )
     print(
         f"Best dim={best['dim']} lag={best['lag']} val={best['val_loss']:.6f} "
         f"test={test_mse:.6f} lyap_step={lyap_step:.4f} lyap_time={lyap_time:.4f} "
@@ -749,8 +976,10 @@ def run_experiment(args):
         f"horizon_est={horizon_est_steps:.2f} horizon_est_time={horizon_est_time:.2f} "
         f"delta={model_error:.4f} delta_mean={model_error_mean:.4f} "
         f"Lq={growth_q:.4f} Lmean={growth_mean:.4f} k={growth_horizon} "
-        f"growth={growth_source} "
-        f"scale={scale:.3f} tol={tolerance:.6f}"
+        f"growth={growth_source} bound={bound_mode} "
+        f"{'margin' if bound_mode == 'horizon_conformal' else 'scale'}={scale:.3f} "
+        f"tol={tolerance:.6f}"
+        f"{window_note}"
         f"{selection_note} elapsed={elapsed:.1f}s"
     )
     return {
@@ -763,6 +992,8 @@ def run_experiment(args):
         "lyapunov_dim": lyap_dim,
         "lyapunov_lag": lyap_lag,
         "horizon_real": horizon_real,
+        "horizon_real_window_median": horizon_window_median,
+        "horizon_real_window_mean": horizon_window_mean,
         "horizon_theory": horizon_theory_steps,
         "horizon_real_time": horizon_real_time,
         "horizon_theory_time": horizon_theory_time,
@@ -790,11 +1021,11 @@ def run_experiment(args):
         "growth_horizon": growth_horizon,
         "growth_Lq": growth_q,
         "growth_Lmean": growth_mean,
-        "bound_mode": "probabilistic",
+        "bound_mode": bound_mode,
         "calibration_alpha": args.calibration_alpha,
         "calibration_floor": args.calibration_floor,
         "calibration_scale": scale,
-        "calibration_samples": len(ratios),
+        "calibration_samples": calibration_samples,
         "calibration_coverage": coverage,
         "horizon_model_cal": horizon_model_cal,
         "horizon_model_cal_time": horizon_model_cal_time,
@@ -869,6 +1100,21 @@ def build_parser(add_help=True):
     parser.add_argument("--error-factor", type=float, default=10.0)
     parser.add_argument("--error-tolerance", type=float, default=1.0)
     parser.add_argument(
+        "--bound-mode",
+        type=str,
+        choices=["probabilistic", "horizon_conformal"],
+        default="probabilistic",
+    )
+    parser.add_argument("--horizon-quantile", type=float, default=None)
+    parser.add_argument("--conformal-bins", type=int, default=1)
+    parser.add_argument("--conformal-min-bin", type=int, default=50)
+    parser.add_argument(
+        "--conformal-feature",
+        type=str,
+        choices=["pred", "pred_jacobian"],
+        default="pred",
+    )
+    parser.add_argument(
         "--delta-mode",
         type=str,
         choices=["quantile", "max", "mean_std"],
@@ -880,6 +1126,18 @@ def build_parser(add_help=True):
     parser.add_argument("--delta-local-k", type=int, default=20)
     parser.add_argument("--delta-local-quantile", type=float, default=None)
     parser.add_argument("--delta-local-samples", type=int, default=500)
+    parser.add_argument("--horizon-samples", type=int, default=None)
+    parser.add_argument(
+        "--horizon-use-jacobian",
+        dest="horizon_use_jacobian",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--no-horizon-jacobian",
+        dest="horizon_use_jacobian",
+        action="store_false",
+    )
     parser.add_argument(
         "--growth-source",
         type=str,

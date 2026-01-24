@@ -227,6 +227,92 @@ def estimate_jacobian_growth(
     return norm_q, norm_mean, norms
 
 
+def jacobian_norm(model, x):
+    """Computes a local Jacobian norm for a single input."""
+    if isinstance(model, LinearAR) and model.weights is not None:
+        weights = np.asarray(model.weights[:-1], dtype=np.float64)
+        return float(np.linalg.norm(weights))
+
+    if isinstance(model, TorchSeqWrapper):
+        x_t = torch.tensor(
+            x, dtype=torch.float32, device=model.device, requires_grad=True
+        ).view(1, -1, 1)
+        out = model.model(x_t)
+        out = out.squeeze()
+        if out.ndim > 0:
+            out = out.sum()
+        grad = torch.autograd.grad(out, x_t, retain_graph=False)[0]
+        return float(torch.norm(grad).item())
+    if isinstance(model, TorchWrapper):
+        x_t = torch.tensor(
+            x, dtype=torch.float32, device=model.device, requires_grad=True
+        ).view(1, -1)
+        out = model.model(x_t)
+        out = out.squeeze()
+        if out.ndim > 0:
+            out = out.sum()
+        grad = torch.autograd.grad(out, x_t, retain_graph=False)[0]
+        return float(torch.norm(grad).item())
+
+    return 0.0
+
+
+def build_horizon_dataset(
+    model,
+    series_std,
+    dim,
+    lag,
+    horizon_max,
+    tolerance,
+    max_windows=None,
+    seed=0,
+    use_jacobian=True,
+):
+    """Builds horizon features and labels for conformal training."""
+    series_std = np.asarray(series_std, dtype=np.float64)
+    window_len = (dim - 1) * lag + 1
+    n = len(series_std) - window_len - horizon_max
+    if n <= 0:
+        return np.empty((0, dim + 3), dtype=np.float64), np.empty(
+            (0,), dtype=np.float64
+        )
+
+    indices = np.arange(n, dtype=np.int64)
+    if max_windows is not None and max_windows < len(indices):
+        rng = np.random.default_rng(seed)
+        indices = rng.choice(indices, size=max_windows, replace=False)
+
+    features = []
+    targets = []
+    for start in indices:
+        history = list(series_std[start : start + window_len])
+        x0 = np.array([history[i * lag] for i in range(dim)], dtype=np.float64)
+        pred0 = float(model.predict(x0))
+        delta_pred = abs(pred0 - history[-1])
+        jac_norm = jacobian_norm(model, x0) if use_jacobian else 0.0
+        feat = np.concatenate([x0, [pred0, delta_pred, jac_norm]])
+
+        horizon = horizon_max
+        hist = history.copy()
+        for h in range(horizon_max):
+            x = [hist[i * lag] for i in range(dim)]
+            pred = model.predict(x)
+            true = series_std[start + (dim - 1) * lag + h + 1]
+            err = abs(pred - true)
+            if err >= tolerance:
+                horizon = h + 1
+                break
+            hist.append(pred)
+            hist.pop(0)
+
+        features.append(feat)
+        targets.append(horizon)
+
+    return np.asarray(features, dtype=np.float64), np.asarray(
+        targets, dtype=np.float64
+    )
+
+
 def rolling_rmse(model, series_std, dim, lag, horizon_max):
     """Computes multi-step RMSE by rolling autoregression."""
     series_std = np.asarray(series_std, dtype=np.float64)

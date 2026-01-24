@@ -94,6 +94,12 @@ def main():
                     "lyapunov_lag": result.get("lyapunov_lag"),
                     "horizon_real": result.get("horizon_real"),
                     "horizon_real_time": result.get("horizon_real_time"),
+                    "horizon_real_window_median": result.get(
+                        "horizon_real_window_median"
+                    ),
+                    "horizon_real_window_mean": result.get(
+                        "horizon_real_window_mean"
+                    ),
                     "horizon_theory": result.get("horizon_theory"),
                     "horizon_theory_time": result.get("horizon_theory_time"),
                     "horizon_model": result.get("horizon_model"),
@@ -138,6 +144,8 @@ def main():
                         record["lyapunov_lag"],
                         record["horizon_real"],
                         format_value(record["horizon_real_time"], decimals=3),
+                        format_value(record.get("horizon_real_window_median")),
+                        format_value(record.get("horizon_real_window_mean")),
                         format_value(record["horizon_theory"]),
                         format_value(record["horizon_theory_time"], decimals=3),
                         format_value(record["horizon_model"]),
@@ -202,6 +210,8 @@ def main():
         "lyapunov_lag",
         "horizon_real",
         "horizon_real_time",
+        "horizon_real_window_median",
+        "horizon_real_window_mean",
         "horizon_theory",
         "horizon_theory_time",
         "horizon_model",

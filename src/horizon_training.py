@@ -129,6 +129,86 @@ def train_mlp(
     return model, best_val
 
 
+def pinball_loss(pred, target, quantile):
+    """Computes the pinball loss for quantile regression."""
+    diff = target - pred
+    return torch.mean(torch.maximum(quantile * diff, (quantile - 1.0) * diff))
+
+
+def train_quantile_mlp(
+    x_train,
+    y_train,
+    x_val,
+    y_val,
+    input_dim,
+    quantile=0.9,
+    hidden_dim=64,
+    epochs=50,
+    lr=1e-3,
+    batch_size=64,
+    patience=10,
+    device="cpu",
+    show_progress=False,
+):
+    """Trains an MLP for quantile regression with early stopping."""
+    if x_val.size == 0 or y_val.size == 0:
+        x_val = x_train
+        y_val = y_train
+
+    model = MLPPredictor(input_dim=input_dim, hidden_dim=hidden_dim).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    train_ds = torch.utils.data.TensorDataset(
+        torch.tensor(x_train, dtype=torch.float32),
+        torch.tensor(y_train, dtype=torch.float32),
+    )
+    train_loader = torch.utils.data.DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True
+    )
+
+    x_val_t = torch.tensor(x_val, dtype=torch.float32, device=device)
+    y_val_t = torch.tensor(y_val, dtype=torch.float32, device=device)
+
+    best_val = float("inf")
+    best_state = None
+    wait = 0
+    progress = ProgressBar(epochs, label="train-quantile") if show_progress else None
+    for _ in range(epochs):
+        model.train()
+        for xb, yb in train_loader:
+            xb = xb.to(device)
+            yb = yb.to(device)
+            optimizer.zero_grad()
+            pred = model(xb)
+            loss = pinball_loss(pred, yb, quantile)
+            loss.backward()
+            optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            val_pred = model(x_val_t)
+            val_loss = pinball_loss(val_pred, y_val_t, quantile).item()
+
+        if val_loss < best_val:
+            best_val = val_loss
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            wait = 0
+        else:
+            wait += 1
+            if wait >= patience:
+                if progress:
+                    progress.update(epochs - progress.current)
+                break
+        if progress:
+            progress.update(1, extra=f"val={val_loss:.4f}")
+
+    if progress:
+        progress.close()
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return model, best_val
+
+
 def train_lstm(
     x_train,
     y_train,
