@@ -356,37 +356,488 @@ def train_final_model(
     return TorchSeqWrapper(model, device)
 
 
+def predict_quantile_ensemble(
+    x_train,
+    y_train,
+    x_val,
+    y_val,
+    x_calib,
+    x_test,
+    quantile,
+    args,
+    device,
+    seed_base,
+):
+    """Trains an ensemble of quantile models and averages their predictions."""
+    members = max(1, int(args.quantile_ensemble))
+    pred_calib = (
+        np.zeros(x_calib.shape[0], dtype=np.float64) if x_calib.size else np.array([])
+    )
+    pred_test = (
+        np.zeros(x_test.shape[0], dtype=np.float64) if x_test.size else np.array([])
+    )
+    for m in range(members):
+        set_seed(seed_base + m * args.quantile_ensemble_stride)
+        model, _ = train_quantile_mlp(
+            x_train,
+            y_train,
+            x_val,
+            y_val,
+            input_dim=x_train.shape[1],
+            quantile=quantile,
+            hidden_dim=args.mlp_hidden,
+            epochs=args.mlp_epochs,
+            lr=args.mlp_lr,
+            batch_size=args.mlp_batch,
+            patience=args.mlp_patience,
+            device=device,
+            show_progress=args.progress,
+        )
+        wrapper = TorchWrapper(model, device)
+        if x_calib.size:
+            pred_calib += wrapper.predict_batch(x_calib).reshape(-1)
+        if x_test.size:
+            pred_test += wrapper.predict_batch(x_test).reshape(-1)
+    if pred_calib.size:
+        pred_calib = pred_calib / float(members)
+    if pred_test.size:
+        pred_test = pred_test / float(members)
+    return pred_calib, pred_test
+
+
+def make_contiguous_folds(n, folds):
+    """Splits indices into contiguous folds."""
+    folds = max(1, int(folds))
+    folds = min(folds, n) if n > 0 else 1
+    sizes = [n // folds] * folds
+    for i in range(n % folds):
+        sizes[i] += 1
+    ranges = []
+    start = 0
+    for size in sizes:
+        end = start + size
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
+def predict_sigma_quantile_ensemble(
+    x_train,
+    y_train,
+    x_val,
+    y_val,
+    x_pred,
+    args,
+    device,
+    seed_base,
+):
+    """Predicts sigma via quantile spread using an ensemble."""
+    q_high = float(min(max(args.scale_quantile_high, 0.5), 0.99))
+    med_pred, _ = predict_quantile_ensemble(
+        x_train,
+        y_train,
+        x_val,
+        y_val,
+        x_pred,
+        np.empty((0, x_train.shape[1]), dtype=np.float64),
+        0.5,
+        args,
+        device,
+        seed_base=seed_base,
+    )
+    high_pred, _ = predict_quantile_ensemble(
+        x_train,
+        y_train,
+        x_val,
+        y_val,
+        x_pred,
+        np.empty((0, x_train.shape[1]), dtype=np.float64),
+        q_high,
+        args,
+        device,
+        seed_base=seed_base + 500,
+    )
+    if med_pred.size == 0:
+        return med_pred
+    return np.maximum(high_pred - med_pred, 0.0)
+
+
+def predict_sigma_mlp(
+    x_train,
+    y_train,
+    x_val,
+    y_val,
+    x_pred,
+    args,
+    device,
+    seed_base,
+):
+    """Predicts sigma via a residual-scale MLP."""
+    set_seed(seed_base)
+    median_model, _ = train_quantile_mlp(
+        x_train,
+        y_train,
+        x_val,
+        y_val,
+        input_dim=x_train.shape[1],
+        quantile=0.5,
+        hidden_dim=args.mlp_hidden,
+        epochs=args.mlp_epochs,
+        lr=args.mlp_lr,
+        batch_size=args.mlp_batch,
+        patience=args.mlp_patience,
+        device=device,
+        show_progress=args.progress,
+    )
+    median_wrapper = TorchWrapper(median_model, device)
+    med_train = median_wrapper.predict_batch(x_train).reshape(-1)
+    med_val = (
+        median_wrapper.predict_batch(x_val).reshape(-1) if x_val.size else med_train
+    )
+    scale_train = np.log(np.abs(y_train - med_train) + args.scale_eps)
+    scale_val = (
+        np.log(np.abs(y_val - med_val) + args.scale_eps) if x_val.size else scale_train
+    )
+    x_scale_val = x_val if x_val.size else x_train
+    scale_model, _ = train_mlp(
+        x_train,
+        scale_train,
+        x_scale_val,
+        scale_val,
+        input_dim=x_train.shape[1],
+        hidden_dim=args.mlp_hidden,
+        epochs=args.mlp_epochs,
+        lr=args.mlp_lr,
+        batch_size=args.mlp_batch,
+        patience=args.mlp_patience,
+        device=device,
+        show_progress=args.progress,
+    )
+    scale_wrapper = TorchWrapper(scale_model, device)
+    if x_pred.size:
+        return np.exp(scale_wrapper.predict_batch(x_pred).reshape(-1))
+    return np.array([], dtype=np.float64)
+
+
+def conformal_quantile(scores, alpha, rng=None, tie_jitter=0.0):
+    """Computes the (1-alpha) conformal quantile with finite-sample correction."""
+    scores = np.asarray(scores, dtype=np.float64)
+    scores = scores[np.isfinite(scores)]
+    if scores.size == 0:
+        return 0.0
+    if tie_jitter and tie_jitter > 0.0:
+        if rng is None:
+            rng = np.random.default_rng()
+        scale = float(np.std(scores))
+        if not np.isfinite(scale) or scale <= 0.0:
+            scale = 1.0
+        jitter = tie_jitter * scale
+        if jitter > 0.0:
+            scores = scores + rng.uniform(0.0, jitter, size=scores.shape)
+    n = scores.size
+    rank = int(math.ceil((n + 1) * (1.0 - alpha))) - 1
+    rank = max(0, min(rank, n - 1))
+    return float(np.sort(scores)[rank])
+
+
+def block_conformal_margin(
+    scores,
+    alpha,
+    block_count,
+    block_quantile=0.9,
+    rng=None,
+    tie_jitter=0.0,
+):
+    """Computes a conservative margin using a high quantile of block margins."""
+    scores = np.asarray(scores, dtype=np.float64)
+    scores = scores[np.isfinite(scores)]
+    if scores.size == 0:
+        return 0.0
+    block_count = max(1, int(block_count))
+    if block_count <= 1 or scores.size <= 1:
+        return conformal_quantile(scores, alpha, rng=rng, tie_jitter=tie_jitter)
+    block_count = min(block_count, scores.size)
+    block_size = max(1, scores.size // block_count)
+    margins = []
+    for i in range(block_count):
+        start = i * block_size
+        end = scores.size if i == block_count - 1 else start + block_size
+        margins.append(
+            conformal_quantile(scores[start:end], alpha, rng=rng, tie_jitter=tie_jitter)
+        )
+    if not margins:
+        return conformal_quantile(scores, alpha, rng=rng, tie_jitter=tie_jitter)
+    block_quantile = float(min(max(block_quantile, 0.0), 1.0))
+    return float(np.quantile(np.asarray(margins, dtype=np.float64), block_quantile))
+
+
+def compute_bin_edges(values, bins):
+    """Computes quantile-based bin edges with infinite caps."""
+    values = np.asarray(values, dtype=np.float64)
+    bins = max(1, int(bins))
+    if values.size == 0 or bins <= 1:
+        return np.array([-np.inf, np.inf], dtype=np.float64)
+    quantiles = np.linspace(0.0, 1.0, bins + 1)
+    edges = np.quantile(values, quantiles)
+    edges = edges.astype(np.float64)
+    edges[0] = -np.inf
+    edges[-1] = np.inf
+    return edges
+
+
+def assign_bin_ids(features, edges_list):
+    """Assigns deterministic bin ids for a set of features."""
+    features = np.asarray(features, dtype=np.float64)
+    n = features.shape[0]
+    if n == 0:
+        return np.array([], dtype=np.int64), 1
+    group_ids = np.zeros(n, dtype=np.int64)
+    multiplier = 1
+    for col, edges in enumerate(edges_list):
+        bins = max(1, len(edges) - 1)
+        if bins <= 1:
+            bin_idx = np.zeros(n, dtype=np.int64)
+        else:
+            bin_idx = np.digitize(features[:, col], edges[1:-1], right=False)
+        group_ids += bin_idx * multiplier
+        multiplier *= bins
+    return group_ids, max(1, multiplier)
+
+
+def fit_mondrian_bins(
+    features,
+    scores,
+    alpha,
+    edges_list,
+    min_bin,
+    shrinkage,
+    global_c,
+    rng=None,
+    tie_jitter=0.0,
+):
+    """Fits per-bin conformal constants with shrinkage toward the global constant."""
+    features = np.asarray(features, dtype=np.float64)
+    scores = np.asarray(scores, dtype=np.float64)
+    group_ids, group_count = assign_bin_ids(features, edges_list)
+    c_groups = np.full(group_count, global_c, dtype=np.float64)
+    counts = (
+        np.bincount(group_ids, minlength=group_count)
+        if group_ids.size
+        else np.zeros(group_count, dtype=np.int64)
+    )
+    for gid in range(group_count):
+        count = int(counts[gid])
+        if count < min_bin:
+            continue
+        group_scores = scores[group_ids == gid]
+        if group_scores.size == 0:
+            continue
+        c_group = conformal_quantile(
+            group_scores, alpha, rng=rng, tie_jitter=tie_jitter
+        )
+        if shrinkage > 0.0:
+            weight = count / (count + shrinkage)
+            c_group = weight * c_group + (1.0 - weight) * global_c
+        c_groups[gid] = c_group
+    return c_groups, group_ids, counts
+
+
+def _best_tree_split(features, split_scores, min_leaf, max_bins, min_gain):
+    best = None
+    n, d = features.shape
+    if n < 2 * min_leaf:
+        return None
+    parent_var = float(np.var(split_scores) * n)
+    for col in range(d):
+        values = features[:, col]
+        if not np.isfinite(values).any():
+            continue
+        if np.all(values == values[0]):
+            continue
+        quantiles = np.linspace(0.1, 0.9, max_bins)
+        thresholds = np.unique(np.quantile(values, quantiles))
+        for threshold in thresholds:
+            left_mask = values <= threshold
+            left_count = int(np.sum(left_mask))
+            right_count = n - left_count
+            if left_count < min_leaf or right_count < min_leaf:
+                continue
+            left_scores = split_scores[left_mask]
+            right_scores = split_scores[~left_mask]
+            left_var = float(np.var(left_scores) * left_count)
+            right_var = float(np.var(right_scores) * right_count)
+            gain = parent_var - (left_var + right_var)
+            if gain <= min_gain:
+                continue
+            cost = -gain
+            if best is None or cost < best["cost"]:
+                best = {
+                    "feature": col,
+                    "threshold": float(threshold),
+                    "left_mask": left_mask,
+                    "cost": cost,
+                }
+    return best
+
+
+def build_conformal_tree(
+    features,
+    scores,
+    split_scores=None,
+    max_depth=4,
+    min_leaf=500,
+    max_bins=9,
+    min_gain=1e-6,
+):
+    """Builds a shallow CART-style tree to partition conformal scores."""
+    features = np.asarray(features, dtype=np.float64)
+    scores = np.asarray(scores, dtype=np.float64)
+    if split_scores is None:
+        split_scores = scores
+    split_scores = np.asarray(split_scores, dtype=np.float64)
+
+    root = {
+        "indices": np.arange(features.shape[0], dtype=np.int64),
+        "depth": 0,
+        "parent": None,
+        "feature": None,
+        "threshold": None,
+        "left": None,
+        "right": None,
+        "size": int(features.shape[0]),
+        "c": 0.0,
+        "leaf_id": None,
+    }
+
+    def split(node):
+        idx = node["indices"]
+        if node["depth"] >= max_depth:
+            return
+        if idx.size < 2 * min_leaf:
+            return
+        sub_features = features[idx]
+        sub_scores = split_scores[idx]
+        best = _best_tree_split(
+            sub_features,
+            sub_scores,
+            min_leaf,
+            max_bins,
+            min_gain,
+        )
+        if best is None:
+            return
+        left_idx = idx[best["left_mask"]]
+        right_idx = idx[~best["left_mask"]]
+        node["feature"] = best["feature"]
+        node["threshold"] = best["threshold"]
+        node["left"] = {
+            "indices": left_idx,
+            "depth": node["depth"] + 1,
+            "parent": node,
+            "feature": None,
+            "threshold": None,
+            "left": None,
+            "right": None,
+            "size": int(left_idx.size),
+            "c": 0.0,
+            "leaf_id": None,
+        }
+        node["right"] = {
+            "indices": right_idx,
+            "depth": node["depth"] + 1,
+            "parent": node,
+            "feature": None,
+            "threshold": None,
+            "left": None,
+            "right": None,
+            "size": int(right_idx.size),
+            "c": 0.0,
+            "leaf_id": None,
+        }
+        split(node["left"])
+        split(node["right"])
+
+    split(root)
+    return root
+
+
+def assign_tree_constants(node, scores, alpha, rng=None, tie_jitter=0.0):
+    """Assigns conformal constants to every node (used for fallback)."""
+    idx = node["indices"]
+    node["size"] = int(idx.size)
+    node["c"] = (
+        conformal_quantile(scores[idx], alpha, rng=rng, tie_jitter=tie_jitter)
+        if idx.size
+        else 0.0
+    )
+    if node["left"] is not None:
+        assign_tree_constants(node["left"], scores, alpha, rng=rng, tie_jitter=tie_jitter)
+    if node["right"] is not None:
+        assign_tree_constants(
+            node["right"], scores, alpha, rng=rng, tie_jitter=tie_jitter
+        )
+
+
+def assign_leaf_ids(node, start=0):
+    """Assigns sequential leaf ids for coverage diagnostics."""
+    if node["left"] is None and node["right"] is None:
+        node["leaf_id"] = start
+        return start + 1
+    next_id = start
+    if node["left"] is not None:
+        next_id = assign_leaf_ids(node["left"], next_id)
+    if node["right"] is not None:
+        next_id = assign_leaf_ids(node["right"], next_id)
+    return next_id
+
+
+def predict_tree_constants(node, features, min_leaf, fallback):
+    """Predicts per-sample conformal constants with leaf fallback."""
+    features = np.asarray(features, dtype=np.float64)
+    constants = np.zeros(features.shape[0], dtype=np.float64)
+    for i in range(features.shape[0]):
+        current = node
+        while current["left"] is not None and current["right"] is not None:
+            if features[i, current["feature"]] <= current["threshold"]:
+                current = current["left"]
+            else:
+                current = current["right"]
+        while current.get("parent") is not None and current["size"] < min_leaf:
+            current = current["parent"]
+        constants[i] = current.get("c", fallback)
+    return constants
+
+
+def predict_leaf_ids(node, features):
+    """Returns leaf ids for each sample."""
+    features = np.asarray(features, dtype=np.float64)
+    leaf_ids = np.zeros(features.shape[0], dtype=np.int64)
+    for i in range(features.shape[0]):
+        current = node
+        while current["left"] is not None and current["right"] is not None:
+            if features[i, current["feature"]] <= current["threshold"]:
+                current = current["left"]
+            else:
+                current = current["right"]
+        leaf_ids[i] = int(current.get("leaf_id", -1))
+    return leaf_ids
+
+
+def extract_bin_features(x_raw, dim, mode):
+    """Extracts regime features for forced Mondrian bins."""
+    if x_raw.size == 0:
+        return np.empty((0, 1), dtype=np.float64)
+    jac_log_idx = dim + 5
+    resid_idx = dim + 3
+    if mode == "jac_log":
+        return x_raw[:, [jac_log_idx]]
+    if mode == "both":
+        return np.column_stack([x_raw[:, jac_log_idx], x_raw[:, resid_idx]])
+    return x_raw[:, [resid_idx]]
+
+
 def run_experiment(args):
     """Runs a full horizon experiment and writes summary CSV output."""
-    def conformal_margin(scores, alpha):
-        scores = np.asarray(scores, dtype=np.float64)
-        scores = scores[np.isfinite(scores)]
-        if scores.size == 0:
-            return 0.0
-        n = scores.size
-        rank = int(math.ceil((n + 1) * (1.0 - alpha))) - 1
-        rank = max(0, min(rank, n - 1))
-        sorted_scores = np.sort(scores)
-        return float(sorted_scores[rank])
-
-    def assign_conformal_bins(preds, jac_norms, bins, feature):
-        preds = np.asarray(preds, dtype=np.float64)
-        jac_norms = np.asarray(jac_norms, dtype=np.float64)
-        if bins <= 1:
-            return np.zeros(preds.shape[0], dtype=np.int64), None
-        quantiles = np.linspace(0.0, 1.0, bins + 1)
-        pred_edges = np.quantile(preds, quantiles)
-        pred_edges[0] = -np.inf
-        pred_edges[-1] = np.inf
-        pred_bins = np.digitize(preds, pred_edges[1:-1], right=False)
-        if feature != "pred_jacobian":
-            return pred_bins, (pred_edges,)
-        jac_edges = np.quantile(jac_norms, quantiles)
-        jac_edges[0] = -np.inf
-        jac_edges[-1] = np.inf
-        jac_bins = np.digitize(jac_norms, jac_edges[1:-1], right=False)
-        return pred_bins * bins + jac_bins, (pred_edges, jac_edges)
-
     set_seed(args.seed)
     device = torch.device("cuda" if args.use_cuda and torch.cuda.is_available() else "cpu")
     series = get_series(args)
@@ -487,6 +938,32 @@ def run_experiment(args):
     horizon_est_time = 0.0
     horizon_model_cal = 0.0
     horizon_model_cal_time = 0.0
+    coverage_test = None
+    tightness_ratio = None
+    slack_median = None
+    slack_p90 = None
+    leaf_coverage_stats = None
+    jac_quantile_coverages = None
+    score_pos_frac = None
+    score_neg_frac = None
+    score_zero_frac = None
+    score_p10 = None
+    score_p50 = None
+    score_p90 = None
+    score_mean = None
+    signed_med = None
+    sigma_med = None
+    sigma_p90 = None
+    sigma_max = None
+    pred_calib_med = None
+    y_calib_med = None
+    l_calib_med = None
+    bin_count = None
+    bin_min_count = None
+    bin_med_count = None
+    bin_c_min = None
+    bin_c_med = None
+    bin_c_max = None
 
     if bound_mode == "horizon_conformal":
         x_train, y_train = build_horizon_dataset(
@@ -495,10 +972,15 @@ def run_experiment(args):
             best["dim"],
             best["lag"],
             args.horizon_max,
-            tolerance,
+            args.error_tolerance,
             max_windows=args.horizon_samples,
             seed=args.seed,
             use_jacobian=args.horizon_use_jacobian,
+            error_mode=args.error_mode,
+            error_factor=args.error_factor,
+            consecutive_k=args.horizon_consecutive_k,
+            stride=args.horizon_thin,
+            feature_horizon=args.horizon_feature_horizon,
         )
         x_val, y_val = build_horizon_dataset(
             model,
@@ -506,10 +988,15 @@ def run_experiment(args):
             best["dim"],
             best["lag"],
             args.horizon_max,
-            tolerance,
+            args.error_tolerance,
             max_windows=args.horizon_samples,
             seed=args.seed + 1,
             use_jacobian=args.horizon_use_jacobian,
+            error_mode=args.error_mode,
+            error_factor=args.error_factor,
+            consecutive_k=args.horizon_consecutive_k,
+            stride=args.horizon_thin,
+            feature_horizon=args.horizon_feature_horizon,
         )
         x_calib_h, y_calib_h = build_horizon_dataset(
             model,
@@ -517,10 +1004,15 @@ def run_experiment(args):
             best["dim"],
             best["lag"],
             args.horizon_max,
-            tolerance,
+            args.error_tolerance,
             max_windows=args.horizon_samples,
             seed=args.seed + 2,
             use_jacobian=args.horizon_use_jacobian,
+            error_mode=args.error_mode,
+            error_factor=args.error_factor,
+            consecutive_k=args.horizon_consecutive_k,
+            stride=args.horizon_calib_thin,
+            feature_horizon=args.horizon_feature_horizon,
         )
         x_test_h, y_test_h = build_horizon_dataset(
             model,
@@ -528,15 +1020,21 @@ def run_experiment(args):
             best["dim"],
             best["lag"],
             args.horizon_max,
-            tolerance,
+            args.error_tolerance,
             max_windows=args.horizon_samples,
             seed=args.seed + 3,
             use_jacobian=args.horizon_use_jacobian,
+            error_mode=args.error_mode,
+            error_factor=args.error_factor,
+            consecutive_k=args.horizon_consecutive_k,
+            stride=args.horizon_thin,
+            feature_horizon=args.horizon_feature_horizon,
         )
 
         if x_train.size == 0:
             raise RuntimeError("Not enough data for conformal horizon training.")
 
+        x_train_raw = x_train
         x_calib_raw = x_calib_h
         x_test_raw = x_test_h
         feat_mean = np.mean(x_train, axis=0)
@@ -547,86 +1045,565 @@ def run_experiment(args):
         x_calib_h = (x_calib_h - feat_mean) / feat_std if x_calib_h.size else x_calib_h
         x_test_h = (x_test_h - feat_mean) / feat_std if x_test_h.size else x_test_h
 
+        use_sigma = (
+            args.conformal_mode in ("normalized", "tree", "bins")
+            and not args.conformal_no_sigma
+        )
         quantile = args.horizon_quantile
         if quantile is None:
-            quantile = 1.0 - args.calibration_alpha
-        horizon_model, _ = train_quantile_mlp(
-            x_train,
-            y_train,
-            x_val,
-            y_val,
-            input_dim=x_train.shape[1],
-            quantile=quantile,
-            hidden_dim=args.mlp_hidden,
-            epochs=args.mlp_epochs,
-            lr=args.mlp_lr,
-            batch_size=args.mlp_batch,
-            patience=args.mlp_patience,
-            device=device,
-            show_progress=args.progress,
-        )
-        horizon_wrapper = TorchWrapper(horizon_model, device)
+            quantile = args.calibration_alpha
 
-        margin = 0.0
-        margin_global = 0.0
-        margin_by_bin = {}
-        if x_calib_h.size:
-            pred_calib = horizon_wrapper.predict_batch(x_calib_h).reshape(-1)
-            pred_calib = np.clip(pred_calib, 1.0, float(args.horizon_max))
-            jac_calib = (
-                x_calib_raw[:, -1]
-                if x_calib_raw.size and args.horizon_use_jacobian
-                else np.zeros_like(pred_calib)
+        pred_calib = np.array([], dtype=np.float64)
+        pred_test = np.array([], dtype=np.float64)
+        sigma_calib = np.ones(0, dtype=np.float64)
+        sigma_test = np.ones(0, dtype=np.float64)
+
+        cv_folds = max(1, int(args.conformal_cv_folds))
+        cv_ready = cv_folds > 1
+        if cv_ready:
+            cv_series = np.concatenate([train_std, calib_series], axis=0)
+            x_cv_raw, y_cv = build_horizon_dataset(
+                model,
+                cv_series,
+                best["dim"],
+                best["lag"],
+                args.horizon_max,
+                args.error_tolerance,
+                max_windows=args.horizon_samples,
+                seed=args.seed + 4,
+                use_jacobian=args.horizon_use_jacobian,
+                error_mode=args.error_mode,
+                error_factor=args.error_factor,
+                consecutive_k=args.horizon_consecutive_k,
+                stride=args.horizon_calib_thin,
+                feature_horizon=args.horizon_feature_horizon,
             )
-            scores = y_calib_h - pred_calib
-            margin_global = conformal_margin(scores, args.calibration_alpha)
-            bin_ids, _ = assign_conformal_bins(
-                pred_calib,
-                jac_calib,
-                args.conformal_bins,
-                args.conformal_feature,
-            )
-            for bin_id in np.unique(bin_ids):
-                bin_scores = scores[bin_ids == bin_id]
-                if bin_scores.size >= args.conformal_min_bin:
-                    margin_by_bin[int(bin_id)] = conformal_margin(
-                        bin_scores, args.calibration_alpha
+            if x_cv_raw.size == 0 or y_cv.size < cv_folds:
+                cv_ready = False
+            else:
+                x_calib_raw = x_cv_raw
+                y_calib_h = y_cv
+                x_calib_h = (x_cv_raw - feat_mean) / feat_std
+                x_fit = x_calib_h
+                y_fit = y_calib_h
+
+                pred_calib = np.zeros(y_calib_h.shape[0], dtype=np.float64)
+                sigma_calib = np.ones_like(pred_calib)
+                folds = make_contiguous_folds(y_calib_h.shape[0], cv_folds)
+                for fold_idx, (start, end) in enumerate(folds):
+                    if end <= start:
+                        continue
+                    train_idx = np.concatenate(
+                        [
+                            np.arange(0, start, dtype=np.int64),
+                            np.arange(end, y_calib_h.shape[0], dtype=np.int64),
+                        ]
                     )
-            margins = np.array(
-                [margin_by_bin.get(int(b), margin_global) for b in bin_ids],
-                dtype=np.float64,
-            )
-            margin = float(np.median(margins)) if margins.size else margin_global
-            calibration_samples = int(len(y_calib_h))
-            coverage = float(np.mean(pred_calib + margins >= y_calib_h))
+                    val_idx = np.arange(start, end, dtype=np.int64)
+                    pred_fold, _ = predict_quantile_ensemble(
+                        x_fit[train_idx],
+                        y_fit[train_idx],
+                        x_val,
+                        y_val,
+                        x_fit[val_idx],
+                        np.empty((0, x_fit.shape[1]), dtype=np.float64),
+                        quantile,
+                        args,
+                        device,
+                        seed_base=args.seed + 1000 + fold_idx * 10000,
+                    )
+                    pred_calib[val_idx] = pred_fold
+                    if use_sigma:
+                        if args.scale_from_quantiles:
+                            sigma_fold = predict_sigma_quantile_ensemble(
+                                x_fit[train_idx],
+                                y_fit[train_idx],
+                                x_val,
+                                y_val,
+                                x_fit[val_idx],
+                                args,
+                                device,
+                                seed_base=args.seed + 2000 + fold_idx * 10000,
+                            )
+                        else:
+                            sigma_fold = predict_sigma_mlp(
+                                x_fit[train_idx],
+                                y_fit[train_idx],
+                                x_val,
+                                y_val,
+                                x_fit[val_idx],
+                                args,
+                                device,
+                                seed_base=args.seed + 2000 + fold_idx * 10000,
+                            )
+                        sigma_calib[val_idx] = sigma_fold
 
-        if x_test_h.size:
-            pred_test = horizon_wrapper.predict_batch(x_test_h).reshape(-1)
-            pred_test = np.clip(pred_test, 1.0, float(args.horizon_max))
-            jac_test = (
-                x_test_raw[:, -1]
-                if x_test_raw.size and args.horizon_use_jacobian
-                else np.zeros_like(pred_test)
+                if pred_calib.size:
+                    pred_calib = np.clip(pred_calib, 1.0, float(args.horizon_max))
+
+                _, pred_test = predict_quantile_ensemble(
+                    x_fit,
+                    y_fit,
+                    x_val,
+                    y_val,
+                    np.empty((0, x_fit.shape[1]), dtype=np.float64),
+                    x_test_h,
+                    quantile,
+                    args,
+                    device,
+                    seed_base=args.seed + 5000,
+                )
+                if pred_test.size:
+                    pred_test = np.clip(pred_test, 1.0, float(args.horizon_max))
+                if use_sigma:
+                    if args.scale_from_quantiles:
+                        sigma_test = predict_sigma_quantile_ensemble(
+                            x_fit,
+                            y_fit,
+                            x_val,
+                            y_val,
+                            x_test_h,
+                            args,
+                            device,
+                            seed_base=args.seed + 6000,
+                        )
+                    else:
+                        sigma_test = predict_sigma_mlp(
+                            x_fit,
+                            y_fit,
+                            x_val,
+                            y_val,
+                            x_test_h,
+                            args,
+                            device,
+                            seed_base=args.seed + 6000,
+                        )
+
+        if not cv_ready:
+            pred_calib, pred_test = predict_quantile_ensemble(
+                x_train,
+                y_train,
+                x_val,
+                y_val,
+                x_calib_h,
+                x_test_h,
+                quantile,
+                args,
+                device,
+                seed_base=args.seed + 1000,
             )
-            test_bin_ids, _ = assign_conformal_bins(
-                pred_test,
-                jac_test,
-                args.conformal_bins,
-                args.conformal_feature,
+            if pred_calib.size:
+                pred_calib = np.clip(pred_calib, 1.0, float(args.horizon_max))
+            if pred_test.size:
+                pred_test = np.clip(pred_test, 1.0, float(args.horizon_max))
+            sigma_calib = np.ones_like(pred_calib)
+            sigma_test = np.ones_like(pred_test)
+            if use_sigma and x_train.size:
+                if args.scale_from_quantiles:
+                    if x_calib_h.size:
+                        sigma_calib = predict_sigma_quantile_ensemble(
+                            x_train,
+                            y_train,
+                            x_val,
+                            y_val,
+                            x_calib_h,
+                            args,
+                            device,
+                            seed_base=args.seed + 2000,
+                        )
+                    if x_test_h.size:
+                        sigma_test = predict_sigma_quantile_ensemble(
+                            x_train,
+                            y_train,
+                            x_val,
+                            y_val,
+                            x_test_h,
+                            args,
+                            device,
+                            seed_base=args.seed + 3000,
+                        )
+                else:
+                    if x_calib_h.size:
+                        sigma_calib = predict_sigma_mlp(
+                            x_train,
+                            y_train,
+                            x_val,
+                            y_val,
+                            x_calib_h,
+                            args,
+                            device,
+                            seed_base=args.seed + 2000,
+                        )
+                    if x_test_h.size:
+                        sigma_test = predict_sigma_mlp(
+                            x_train,
+                            y_train,
+                            x_val,
+                            y_val,
+                            x_test_h,
+                            args,
+                            device,
+                            seed_base=args.seed + 3000,
+                        )
+
+        if use_sigma and sigma_calib.size:
+            sigma_calib = np.maximum(sigma_calib, args.scale_floor)
+            if args.scale_floor_quantile is not None:
+                floor_q = float(
+                    np.quantile(
+                        sigma_calib,
+                        min(max(args.scale_floor_quantile, 0.0), 1.0),
+                    )
+                )
+                if np.isfinite(floor_q) and floor_q > 0.0:
+                    sigma_calib = np.maximum(sigma_calib, floor_q)
+            if args.scale_cap is not None:
+                sigma_calib = np.minimum(sigma_calib, args.scale_cap)
+            elif args.scale_cap_quantile is not None:
+                cap = float(
+                    np.quantile(
+                        sigma_calib,
+                        min(max(args.scale_cap_quantile, 0.0), 1.0),
+                    )
+                )
+                if np.isfinite(cap) and cap > 0.0:
+                    sigma_calib = np.minimum(sigma_calib, cap)
+        if use_sigma and sigma_test.size:
+            sigma_test = np.maximum(sigma_test, args.scale_floor)
+            if args.scale_floor_quantile is not None and sigma_calib.size:
+                floor_q = float(
+                    np.quantile(
+                        sigma_calib,
+                        min(max(args.scale_floor_quantile, 0.0), 1.0),
+                    )
+                )
+                if np.isfinite(floor_q) and floor_q > 0.0:
+                    sigma_test = np.maximum(sigma_test, floor_q)
+            if args.scale_cap is not None:
+                sigma_test = np.minimum(sigma_test, args.scale_cap)
+            elif args.scale_cap_quantile is not None and sigma_calib.size:
+                cap = float(
+                    np.quantile(
+                        sigma_calib,
+                        min(max(args.scale_cap_quantile, 0.0), 1.0),
+                    )
+                )
+                if np.isfinite(cap) and cap > 0.0:
+                    sigma_test = np.minimum(sigma_test, cap)
+
+        if args.offset_calibration and pred_calib.size:
+            offset_q = (
+                args.offset_quantile
+                if args.offset_quantile is not None
+                else args.calibration_alpha
             )
-            test_margins = np.array(
-                [margin_by_bin.get(int(b), margin_global) for b in test_bin_ids],
-                dtype=np.float64,
+            offset_q = float(min(max(offset_q, 0.0), 1.0))
+            if use_sigma:
+                resid_scaled = (y_calib_h - pred_calib) / np.maximum(
+                    sigma_calib, args.scale_floor
+                )
+                offset_scale = float(np.quantile(resid_scaled, offset_q))
+                offset_scale = max(offset_scale, 0.0)
+                pred_calib = pred_calib + offset_scale * sigma_calib
+                if pred_test.size:
+                    pred_test = pred_test + offset_scale * sigma_test
+            else:
+                resid = y_calib_h - pred_calib
+                offset = float(np.quantile(resid, offset_q))
+                offset = max(offset, 0.0)
+                pred_calib = pred_calib + offset
+                if pred_test.size:
+                    pred_test = pred_test + offset
+
+        c_global = 0.0
+        pred_test_cal = np.array([], dtype=np.float64)
+        tree = None
+        bin_model = None
+        leaf_ids = None
+        tie_rng = np.random.default_rng(args.seed + 12345)
+        if pred_calib.size:
+            signed = pred_calib - y_calib_h
+            if use_sigma:
+                scores = signed / np.maximum(sigma_calib, args.scale_floor)
+            else:
+                scores = signed
+            split_scores = np.abs(pred_calib - y_calib_h)
+            if use_sigma:
+                split_scores = split_scores / np.maximum(sigma_calib, args.scale_floor)
+            if scores.size:
+                score_pos_frac = float(np.mean(scores > 0.0))
+                score_neg_frac = float(np.mean(scores < 0.0))
+                score_zero_frac = float(np.mean(scores == 0.0))
+                score_p10 = float(np.quantile(scores, 0.1))
+                score_p50 = float(np.median(scores))
+                score_p90 = float(np.quantile(scores, 0.9))
+                score_mean = float(np.mean(scores))
+            if signed.size:
+                signed_med = float(np.median(signed))
+            if pred_calib.size:
+                pred_calib_med = float(np.median(pred_calib))
+            if y_calib_h.size:
+                y_calib_med = float(np.median(y_calib_h))
+            if use_sigma and sigma_calib.size:
+                sigma_med = float(np.median(sigma_calib))
+                sigma_p90 = float(np.quantile(sigma_calib, 0.9))
+                sigma_max = float(np.max(sigma_calib))
+            c_global = block_conformal_margin(
+                scores,
+                args.calibration_alpha,
+                args.block_count,
+                block_quantile=args.block_quantile,
+                rng=tie_rng,
+                tie_jitter=args.conformal_tie_jitter,
             )
+
+            if args.conformal_mode == "tree":
+                jac_idx = best["dim"] + 2
+                jac_log_idx = best["dim"] + 5
+                resid_idx = best["dim"] + 3
+                err_var_idx = best["dim"] + 6
+                pred_var_idx = best["dim"] + 7
+                jac_calib = (
+                    x_calib_raw[:, jac_idx]
+                    if x_calib_raw.size
+                    else np.zeros_like(pred_calib)
+                )
+                jac_log_calib = (
+                    x_calib_raw[:, jac_log_idx]
+                    if x_calib_raw.size
+                    else np.zeros_like(pred_calib)
+                )
+                resid_calib = (
+                    x_calib_raw[:, resid_idx]
+                    if x_calib_raw.size
+                    else np.zeros_like(pred_calib)
+                )
+                err_var_calib = (
+                    x_calib_raw[:, err_var_idx]
+                    if x_calib_raw.size
+                    else np.zeros_like(pred_calib)
+                )
+                pred_var_calib = (
+                    x_calib_raw[:, pred_var_idx]
+                    if x_calib_raw.size
+                    else np.zeros_like(pred_calib)
+                )
+                min_leaf_eff = min(
+                    args.conformal_min_leaf,
+                    max(30, int(scores.size // 4))
+                    if scores.size
+                    else args.conformal_min_leaf,
+                )
+                tree_features_calib = np.column_stack(
+                    [
+                        pred_calib,
+                        sigma_calib,
+                        jac_calib,
+                        jac_log_calib,
+                        resid_calib,
+                        err_var_calib,
+                        pred_var_calib,
+                    ]
+                )
+                tree = build_conformal_tree(
+                    tree_features_calib,
+                    scores,
+                    split_scores=split_scores,
+                    max_depth=args.conformal_tree_depth,
+                    min_leaf=min_leaf_eff,
+                    max_bins=args.conformal_tree_bins,
+                    min_gain=args.conformal_tree_min_gain,
+                )
+                assign_tree_constants(
+                    tree,
+                    scores,
+                    args.calibration_alpha,
+                    rng=tie_rng,
+                    tie_jitter=args.conformal_tie_jitter,
+                )
+                assign_leaf_ids(tree)
+                c_calib = predict_tree_constants(
+                    tree, tree_features_calib, min_leaf_eff, c_global
+                )
+            elif args.conformal_mode == "bins":
+                bin_features_train = extract_bin_features(
+                    x_train_raw, best["dim"], args.conformal_bin_feature
+                )
+                bin_features_calib = extract_bin_features(
+                    x_calib_raw, best["dim"], args.conformal_bin_feature
+                )
+                if bin_features_train.size and bin_features_calib.size:
+                    bin_pool = np.vstack([bin_features_train, bin_features_calib])
+                elif bin_features_calib.size:
+                    bin_pool = bin_features_calib
+                else:
+                    bin_pool = bin_features_train
+                bin_dim = bin_pool.shape[1] if bin_pool.ndim == 2 else 1
+                edges_list = [
+                    compute_bin_edges(bin_pool[:, col], args.conformal_bins)
+                    for col in range(bin_dim)
+                ]
+                c_groups, bin_ids_calib, bin_counts = fit_mondrian_bins(
+                    bin_features_calib,
+                    scores,
+                    args.calibration_alpha,
+                    edges_list,
+                    args.conformal_min_bin,
+                    args.conformal_bin_shrinkage,
+                    c_global,
+                    rng=tie_rng,
+                    tie_jitter=args.conformal_tie_jitter,
+                )
+                bin_model = {
+                    "edges": edges_list,
+                    "c_groups": c_groups,
+                    "counts": bin_counts,
+                }
+                c_calib = (
+                    c_groups[bin_ids_calib]
+                    if bin_ids_calib.size
+                    else np.full_like(pred_calib, c_global)
+                )
+                if bin_counts.size:
+                    nonzero_counts = bin_counts[bin_counts > 0]
+                    if nonzero_counts.size:
+                        bin_count = int(nonzero_counts.size)
+                        bin_min_count = int(np.min(nonzero_counts))
+                        bin_med_count = float(np.median(nonzero_counts))
+                        c_used = c_groups[bin_counts > 0]
+                        if c_used.size:
+                            bin_c_min = float(np.min(c_used))
+                            bin_c_med = float(np.median(c_used))
+                            bin_c_max = float(np.max(c_used))
+            else:
+                c_calib = np.full_like(pred_calib, c_global)
+
+            sigma_term = sigma_calib if use_sigma else np.ones_like(c_calib)
+            l_calib = np.clip(
+                pred_calib - c_calib * sigma_term, 1.0, float(args.horizon_max)
+            )
+            if l_calib.size:
+                l_calib_med = float(np.median(l_calib))
+            calibration_samples = int(len(y_calib_h))
+            coverage = float(np.mean(y_calib_h >= l_calib)) if y_calib_h.size else None
+
+        if pred_test.size:
+            if args.conformal_mode == "tree" and tree is not None:
+                jac_idx = best["dim"] + 2
+                jac_log_idx = best["dim"] + 5
+                resid_idx = best["dim"] + 3
+                err_var_idx = best["dim"] + 6
+                pred_var_idx = best["dim"] + 7
+                jac_test = (
+                    x_test_raw[:, jac_idx]
+                    if x_test_raw.size
+                    else np.zeros_like(pred_test)
+                )
+                jac_log_test = (
+                    x_test_raw[:, jac_log_idx]
+                    if x_test_raw.size
+                    else np.zeros_like(pred_test)
+                )
+                resid_test = (
+                    x_test_raw[:, resid_idx]
+                    if x_test_raw.size
+                    else np.zeros_like(pred_test)
+                )
+                err_var_test = (
+                    x_test_raw[:, err_var_idx]
+                    if x_test_raw.size
+                    else np.zeros_like(pred_test)
+                )
+                pred_var_test = (
+                    x_test_raw[:, pred_var_idx]
+                    if x_test_raw.size
+                    else np.zeros_like(pred_test)
+                )
+                tree_features_test = np.column_stack(
+                    [
+                        pred_test,
+                        sigma_test,
+                        jac_test,
+                        jac_log_test,
+                        resid_test,
+                        err_var_test,
+                        pred_var_test,
+                    ]
+                )
+                c_test = predict_tree_constants(
+                    tree, tree_features_test, min_leaf_eff, c_global
+                )
+                leaf_ids = predict_leaf_ids(tree, tree_features_test)
+            elif args.conformal_mode == "bins" and bin_model is not None:
+                bin_features_test = extract_bin_features(
+                    x_test_raw, best["dim"], args.conformal_bin_feature
+                )
+                bin_ids_test, _ = assign_bin_ids(
+                    bin_features_test, bin_model["edges"]
+                )
+                c_test = (
+                    bin_model["c_groups"][bin_ids_test]
+                    if bin_ids_test.size
+                    else np.full_like(pred_test, c_global)
+                )
+                leaf_ids = bin_ids_test
+            else:
+                c_test = np.full_like(pred_test, c_global)
+
+            sigma_term_test = sigma_test if use_sigma else np.ones_like(pred_test)
             pred_test_cal = np.clip(
-                pred_test + test_margins, 1.0, float(args.horizon_max)
+                pred_test - c_test * sigma_term_test, 1.0, float(args.horizon_max)
             )
             horizon_model_steps = float(np.median(pred_test))
             horizon_est_steps = float(np.mean(pred_test))
             horizon_model_cal = float(np.median(pred_test_cal))
+
         if y_test_h.size:
             horizon_window_median = float(np.median(y_test_h))
             horizon_window_mean = float(np.mean(y_test_h))
+            if pred_test_cal.size:
+                coverage_test = float(np.mean(y_test_h >= pred_test_cal))
+                slack = y_test_h - pred_test_cal
+                tightness_ratio = (
+                    float(np.median(pred_test_cal) / np.median(y_test_h))
+                    if np.median(y_test_h) > 0.0
+                    else None
+                )
+                slack_median = float(np.median(slack))
+                slack_p90 = float(np.quantile(slack, 0.9))
+
+        if pred_test_cal.size and x_test_raw.size and y_test_h.size:
+            jac_idx = best["dim"] + 2
+            jac_values = x_test_raw[:, jac_idx]
+            edges = np.quantile(jac_values, np.linspace(0.0, 1.0, 5))
+            edges[0] = -np.inf
+            edges[-1] = np.inf
+            jac_bins = np.digitize(jac_values, edges[1:-1], right=False)
+            jac_quantile_coverages = {}
+            for b in range(4):
+                mask = jac_bins == b
+                if np.any(mask):
+                    jac_quantile_coverages[f"jac_q{b + 1}"] = float(
+                        np.mean(y_test_h[mask] >= pred_test_cal[mask])
+                    )
+                else:
+                    jac_quantile_coverages[f"jac_q{b + 1}"] = None
+
+        if pred_test_cal.size and leaf_ids is not None and y_test_h.size:
+            leaf_coverages = []
+            for leaf_id in np.unique(leaf_ids):
+                mask = leaf_ids == leaf_id
+                if np.any(mask):
+                    leaf_coverages.append(float(np.mean(y_test_h[mask] >= pred_test_cal[mask])))
+            if leaf_coverages:
+                leaf_coverages = np.asarray(leaf_coverages, dtype=np.float64)
+                leaf_coverage_stats = {
+                    "leaf_count": int(leaf_coverages.size),
+                    "leaf_min": float(np.min(leaf_coverages)),
+                    "leaf_p10": float(np.quantile(leaf_coverages, 0.1)),
+                    "leaf_med": float(np.median(leaf_coverages)),
+                    "leaf_mean": float(np.mean(leaf_coverages)),
+                }
 
         horizon_model_time = (
             horizon_model_steps * dt
@@ -641,8 +1618,8 @@ def run_experiment(args):
             if math.isfinite(horizon_model_cal)
             else float("inf")
         )
-        model_error_mode = "conformal"
-        scale = margin
+        model_error_mode = f"conformal_{args.conformal_mode}"
+        scale = c_global
         growth_source = "conformal"
     else:
         x_calib, calib_residuals = compute_calibration_residuals(
@@ -977,7 +1954,7 @@ def run_experiment(args):
         f"delta={model_error:.4f} delta_mean={model_error_mean:.4f} "
         f"Lq={growth_q:.4f} Lmean={growth_mean:.4f} k={growth_horizon} "
         f"growth={growth_source} bound={bound_mode} "
-        f"{'margin' if bound_mode == 'horizon_conformal' else 'scale'}={scale:.3f} "
+        f"{'calib_c' if bound_mode == 'horizon_conformal' else 'scale'}={scale:.3f} "
         f"tol={tolerance:.6f}"
         f"{window_note}"
         f"{selection_note} elapsed={elapsed:.1f}s"
@@ -1029,6 +2006,33 @@ def run_experiment(args):
         "calibration_coverage": coverage,
         "horizon_model_cal": horizon_model_cal,
         "horizon_model_cal_time": horizon_model_cal_time,
+        "coverage_test": coverage_test,
+        "tightness_ratio": tightness_ratio,
+        "slack_median": slack_median,
+        "slack_p90": slack_p90,
+        "leaf_coverage_stats": leaf_coverage_stats,
+        "jac_quantile_coverages": jac_quantile_coverages,
+        "score_pos_frac": score_pos_frac,
+        "score_neg_frac": score_neg_frac,
+        "score_zero_frac": score_zero_frac,
+        "score_p10": score_p10,
+        "score_p50": score_p50,
+        "score_p90": score_p90,
+        "score_mean": score_mean,
+        "signed_med": signed_med,
+        "c_global": c_global,
+        "sigma_med": sigma_med,
+        "sigma_p90": sigma_p90,
+        "sigma_max": sigma_max,
+        "pred_calib_med": pred_calib_med,
+        "y_calib_med": y_calib_med,
+        "l_calib_med": l_calib_med,
+        "bin_count": bin_count,
+        "bin_min_count": bin_min_count,
+        "bin_med_count": bin_med_count,
+        "bin_c_min": bin_c_min,
+        "bin_c_med": bin_c_med,
+        "bin_c_max": bin_c_max,
         "error_tolerance_used": tolerance,
         "selection_metric": args.selection_metric,
         "selection_horizon": best["selection"]["horizon"]
@@ -1106,14 +2110,39 @@ def build_parser(add_help=True):
         default="probabilistic",
     )
     parser.add_argument("--horizon-quantile", type=float, default=None)
-    parser.add_argument("--conformal-bins", type=int, default=1)
-    parser.add_argument("--conformal-min-bin", type=int, default=50)
+    parser.add_argument(
+        "--conformal-mode",
+        type=str,
+        choices=["global", "normalized", "tree", "bins"],
+        default="bins",
+    )
+    parser.add_argument("--conformal-bins", type=int, default=4)
+    parser.add_argument("--conformal-min-bin", type=int, default=5)
+    parser.add_argument("--conformal-bin-shrinkage", type=float, default=20.0)
+    parser.add_argument("--conformal-tie-jitter", type=float, default=1e-6)
+    parser.add_argument(
+        "--conformal-bin-feature",
+        type=str,
+        choices=["resid", "jac_log", "both"],
+        default="resid",
+    )
+    parser.add_argument("--conformal-cv-folds", type=int, default=1)
+    parser.add_argument(
+        "--conformal-no-sigma",
+        dest="conformal_no_sigma",
+        action="store_true",
+        default=False,
+    )
     parser.add_argument(
         "--conformal-feature",
         type=str,
         choices=["pred", "pred_jacobian"],
         default="pred",
     )
+    parser.add_argument("--conformal-tree-depth", type=int, default=4)
+    parser.add_argument("--conformal-min-leaf", type=int, default=500)
+    parser.add_argument("--conformal-tree-bins", type=int, default=9)
+    parser.add_argument("--conformal-tree-min-gain", type=float, default=1e-6)
     parser.add_argument(
         "--delta-mode",
         type=str,
@@ -1127,6 +2156,43 @@ def build_parser(add_help=True):
     parser.add_argument("--delta-local-quantile", type=float, default=None)
     parser.add_argument("--delta-local-samples", type=int, default=500)
     parser.add_argument("--horizon-samples", type=int, default=None)
+    parser.add_argument("--horizon-consecutive-k", type=int, default=2)
+    parser.add_argument("--horizon-feature-horizon", type=int, default=3)
+    parser.add_argument("--horizon-thin", type=int, default=1)
+    parser.add_argument("--horizon-calib-thin", type=int, default=1)
+    parser.add_argument("--scale-eps", type=float, default=1e-6)
+    parser.add_argument("--scale-floor", type=float, default=1e-3)
+    parser.add_argument("--scale-cap", type=float, default=None)
+    parser.add_argument(
+        "--scale-from-quantiles",
+        dest="scale_from_quantiles",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--no-scale-from-quantiles",
+        dest="scale_from_quantiles",
+        action="store_false",
+    )
+    parser.add_argument("--scale-quantile-high", type=float, default=0.9)
+    parser.add_argument("--scale-cap-quantile", type=float, default=0.95)
+    parser.add_argument("--scale-floor-quantile", type=float, default=0.1)
+    parser.add_argument("--quantile-ensemble", type=int, default=3)
+    parser.add_argument("--quantile-ensemble-stride", type=int, default=1000)
+    parser.add_argument("--block-count", type=int, default=5)
+    parser.add_argument("--block-quantile", type=float, default=0.9)
+    parser.add_argument(
+        "--offset-calibration",
+        dest="offset_calibration",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--no-offset-calibration",
+        dest="offset_calibration",
+        action="store_false",
+    )
+    parser.add_argument("--offset-quantile", type=float, default=None)
     parser.add_argument(
         "--horizon-use-jacobian",
         dest="horizon_use_jacobian",

@@ -257,6 +257,29 @@ def jacobian_norm(model, x):
     return 0.0
 
 
+def horizon_from_window_rmse(rmse_by_h, tolerance, consecutive=2):
+    """Returns the first horizon where K consecutive RMSE values exceed tolerance."""
+    rmse_by_h = np.asarray(rmse_by_h, dtype=np.float64)
+    if rmse_by_h.size == 0:
+        return 0.0
+    if not np.isfinite(tolerance) or tolerance <= 0.0:
+        return 1.0
+
+    consecutive = max(1, int(consecutive))
+    if consecutive == 1:
+        for idx, value in enumerate(rmse_by_h, start=1):
+            if value >= tolerance:
+                return idx
+        return float(len(rmse_by_h))
+
+    limit = rmse_by_h.size - consecutive + 1
+    for idx in range(limit):
+        window = rmse_by_h[idx : idx + consecutive]
+        if np.all(window >= tolerance):
+            return float(idx + 1)
+    return float(len(rmse_by_h))
+
+
 def build_horizon_dataset(
     model,
     series_std,
@@ -267,20 +290,28 @@ def build_horizon_dataset(
     max_windows=None,
     seed=0,
     use_jacobian=True,
+    error_mode="absolute",
+    error_factor=1.0,
+    consecutive_k=2,
+    stride=1,
+    feature_horizon=3,
+    eps=1e-8,
 ):
-    """Builds horizon features and labels for conformal training."""
+    """Builds horizon features and per-window horizon labels for conformal training."""
     series_std = np.asarray(series_std, dtype=np.float64)
     window_len = (dim - 1) * lag + 1
     n = len(series_std) - window_len - horizon_max
     if n <= 0:
-        return np.empty((0, dim + 3), dtype=np.float64), np.empty(
+        return np.empty((0, dim + 8), dtype=np.float64), np.empty(
             (0,), dtype=np.float64
         )
 
-    indices = np.arange(n, dtype=np.int64)
+    stride = max(1, int(stride))
+    indices = np.arange(0, n, stride, dtype=np.int64)
     if max_windows is not None and max_windows < len(indices):
         rng = np.random.default_rng(seed)
         indices = rng.choice(indices, size=max_windows, replace=False)
+    indices = np.sort(indices)
 
     features = []
     targets = []
@@ -289,21 +320,62 @@ def build_horizon_dataset(
         x0 = np.array([history[i * lag] for i in range(dim)], dtype=np.float64)
         pred0 = float(model.predict(x0))
         delta_pred = abs(pred0 - history[-1])
-        jac_norm = jacobian_norm(model, x0) if use_jacobian else 0.0
-        feat = np.concatenate([x0, [pred0, delta_pred, jac_norm]])
+        true0 = series_std[start + (dim - 1) * lag + 1]
+        resid1 = abs(pred0 - true0)
+        jac_norm0 = jacobian_norm(model, x0) if use_jacobian else 0.0
 
-        horizon = horizon_max
         hist = history.copy()
+        errors = np.zeros(horizon_max, dtype=np.float64)
+        jac_values = []
+        preds = []
         for h in range(horizon_max):
             x = [hist[i * lag] for i in range(dim)]
             pred = model.predict(x)
             true = series_std[start + (dim - 1) * lag + h + 1]
-            err = abs(pred - true)
-            if err >= tolerance:
-                horizon = h + 1
-                break
+            err = pred - true
+            errors[h] = err * err
+            if use_jacobian and h < feature_horizon:
+                jac_values.append(jacobian_norm(model, np.asarray(x, dtype=np.float64)))
+            if h < feature_horizon:
+                preds.append(pred)
             hist.append(pred)
             hist.pop(0)
+
+        rmse_by_h = np.sqrt(np.cumsum(errors) / np.arange(1, horizon_max + 1))
+        if error_mode == "relative":
+            tolerance_local = rmse_by_h[0] * error_factor
+        else:
+            tolerance_local = tolerance
+
+        horizon = horizon_from_window_rmse(
+            rmse_by_h, tolerance_local, consecutive=consecutive_k
+        )
+
+        jac_mean = jac_norm0
+        jac_log_mean = math.log(max(jac_norm0, eps)) if jac_norm0 > 0.0 else 0.0
+        if use_jacobian and jac_values:
+            jac_arr = np.asarray(jac_values, dtype=np.float64)
+            jac_mean = float(np.mean(jac_arr))
+            jac_log_mean = float(np.mean(np.log(np.maximum(jac_arr, eps))))
+        err_window = min(feature_horizon, horizon_max)
+        err_var = float(np.var(np.sqrt(errors[:err_window]))) if err_window > 1 else 0.0
+        pred_var = float(np.var(np.asarray(preds, dtype=np.float64))) if len(preds) > 1 else 0.0
+
+        feat = np.concatenate(
+            [
+                x0,
+                [
+                    pred0,
+                    delta_pred,
+                    jac_norm0,
+                    resid1,
+                    jac_mean,
+                    jac_log_mean,
+                    err_var,
+                    pred_var,
+                ],
+            ]
+        )
 
         features.append(feat)
         targets.append(horizon)
