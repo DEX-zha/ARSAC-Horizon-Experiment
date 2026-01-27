@@ -1,0 +1,27 @@
+# Internal constants for horizon_experiment
+
+horizon_min: 1.0
+jacobian_bins: 4
+score_quantiles: [0.1, 0.5, 0.9]
+slack_quantile: 0.9
+tree_min_leaf_floor: 30
+
+seed_offsets:
+  train: 0
+  val: 1
+  calib: 2
+  test: 3
+  cv: 4
+  tie_rng: 12345
+
+seed_bases:
+  quantile_cv: 1000
+  sigma_cv: 2000
+  quantile_test: 5000
+  sigma_test: 6000
+  quantile_no_cv: 1000
+  sigma_no_cv_calib: 2000
+  sigma_no_cv_test: 3000
+
+seed_strides:
+  cv_fold: 10000
