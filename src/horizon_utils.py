@@ -176,6 +176,10 @@ def horizon_from_model_bound_by_growth(growth, init_err, delta, tolerance):
 
     Uses e_{t+1} <= L * e_t + delta with L = growth (scalar > 0).
     """
+    # NaN guard: return 0 if any input is NaN
+    if not math.isfinite(growth) or not math.isfinite(init_err) or not math.isfinite(delta) or not math.isfinite(tolerance):
+        return 0.0
+    
     if tolerance <= 0:
         return 0.0
     init_err = max(0.0, float(init_err))
@@ -197,7 +201,11 @@ def horizon_from_model_bound_by_growth(growth, init_err, delta, tolerance):
     ratio = (tolerance + offset) / denom
     if ratio <= 1.0:
         return 0.0
-    return math.ceil(math.log(ratio) / math.log(growth))
+    
+    log_growth = math.log(growth)
+    if log_growth <= 0.0:
+        return 0.0
+    return math.ceil(math.log(ratio) / log_growth)
 
 
 def horizon_from_model_bound(lyap_step, init_err, delta, tolerance):

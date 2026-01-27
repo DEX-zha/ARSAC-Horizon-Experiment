@@ -12,7 +12,9 @@ from src.horizon_benchmark_utils import (
     parse_list,
     write_csv_rows,
 )
-from src.horizon_experiment import ProgressBar, build_parser, load_config, run_experiment
+from src.horizon_progress import ProgressBar
+from src.horizon_cli import build_parser, load_config
+from src.horizon_experiment import run_experiment
 
 
 def summarize_records(records, fields):
