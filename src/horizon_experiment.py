@@ -27,7 +27,7 @@ from src.horizon_metrics import (
 )
 from src.horizon_models import LinearAR, TorchSeqWrapper, TorchWrapper
 from src.horizon_plots import plot_log_divergence, plot_rmse
-from src.horizon_progress import ProgressBar
+# ProgressBar removed - now handled by Forecaster
 from src.horizon_training import (
     build_multistep_supervised,
     train_lstm,
@@ -45,17 +45,8 @@ from src.horizon_utils import (
 )
 from src.horizon_data import DataManager
 from src.horizon_forecast import Forecaster
-from src.horizon_calibration import (
-    ConformalTreeEstimator, 
-    conformal_quantile,
-    block_conformal_margin,
-    fit_mondrian_bins,
-    compute_bin_edges,
-    extract_bin_features,
-    predict_quantile_ensemble,
-    predict_sigma_quantile_ensemble,
-    predict_sigma_mlp
-)
+# Note: These calibration functions are defined locally in this file
+# The horizon_calibration module is used for the canonical implementations
 
 
 def train_final_model(
@@ -432,7 +423,7 @@ class ConformalTreeEstimator:
     def predict(self, X):
         leaf_ids = self.tree.apply(X)
         # Vectorized map approach
-        return np.array([self.leaf_quantiles.get(l, self.global_fallback) for l in leaf_ids])
+        return np.array([self.leaf_quantiles.get(leaf_id, self.global_fallback) for leaf_id in leaf_ids])
 
     def apply(self, X):
         return self.tree.apply(X)
@@ -501,9 +492,6 @@ def run_experiment(args):
     data_manager = DataManager(args)
     train_std, val_std, calib_std, test_std = data_manager.prepare_data()
     train_raw, val_raw, calib_raw, test_raw = data_manager.get_raw_splits()
-
-    dim_values = list(range(args.dim_min, args.dim_max + 1))
-    lag_values = list(range(args.lag_min, args.lag_max + 1))
 
     t0 = time.time()
     
@@ -1189,10 +1177,8 @@ def run_experiment(args):
                         pred_var_test,
                     ]
                 )
-                c_test = predict_tree_constants(
-                    tree, tree_features_test, min_leaf_eff, c_global
-                )
-                leaf_ids = predict_leaf_ids(tree, tree_features_test)
+                c_test = tree.predict(tree_features_test)
+                leaf_ids = tree.apply(tree_features_test)
             elif args.conformal_mode == "bins" and bin_model is not None:
                 bin_features_test = extract_bin_features(
                     x_test_raw, best["dim"], args.conformal_bin_feature
