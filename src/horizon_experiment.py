@@ -1,13 +1,11 @@
 """AI-driven prediction horizon experiment for chaotic time series."""
 
-import argparse
+from src.horizon_cli import main
 import csv
 import math
 import os
-import sys
 import time
 
-import yaml
 import logging
 import numpy as np
 import torch
@@ -25,17 +23,8 @@ from src.horizon_metrics import (
     rolling_rmse,
     window_horizons,
 )
-from src.horizon_models import LinearAR, TorchSeqWrapper, TorchWrapper
 from src.horizon_plots import plot_log_divergence, plot_rmse
 # ProgressBar removed - now handled by Forecaster
-from src.horizon_training import (
-    build_multistep_supervised,
-    train_lstm,
-    train_lstm_multistep,
-    train_mlp,
-    train_mlp_multistep,
-    train_quantile_mlp,
-)
 from src.horizon_utils import (
     set_seed, 
     build_supervised,
@@ -46,7 +35,6 @@ from src.horizon_utils import (
 from src.horizon_data import DataManager
 from src.horizon_forecast import Forecaster
 from src.horizon_conformal import (
-    conformal_quantile,
     block_conformal_margin,
     compute_bin_edges,
     assign_bin_ids,
@@ -1264,11 +1252,6 @@ def run_experiment(args):
         if best.get("selection") and best["selection"]["horizon"] is not None
         else None,
     }
-
-
-# CLI functions moved to horizon_cli.py
-from src.horizon_cli import build_parser, load_config, setup_logging, main
-
 
 if __name__ == "__main__":
     main()
