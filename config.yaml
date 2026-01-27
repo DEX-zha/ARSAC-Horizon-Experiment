@@ -1,0 +1,137 @@
+
+# Default Configuration for ARSAC Horizon Experiment
+
+# Dataset
+dataset: lorenz
+series_len: 4000
+warmup: 1000
+seed: 0
+train_ratio: 0.7
+val_ratio: 0.15
+calib_ratio: 0.05
+
+# Embedding Search
+dim_min: 2
+dim_max: 8
+lag_min: 1
+lag_max: 8
+
+# Model
+model: mlp
+linear_reg: 1.0e-4
+
+# MLP Config
+mlp_hidden: 64
+mlp_epochs: 80
+mlp_lr: 1.0e-3
+mlp_batch: 64
+mlp_patience: 12
+train_multistep: false
+train_horizon: 5
+tf_start: 1.0
+tf_end: 0.2
+tf_val: 0.0
+
+# LSTM Config
+lstm_hidden: 64
+lstm_layers: 1
+lstm_epochs: 80
+lstm_lr: 1.0e-3
+lstm_batch: 64
+lstm_patience: 12
+
+# Selection
+horizon_max: 50
+selection_metric: val_mse
+selection_horizon_max: 20
+
+# Error Bounds
+error_mode: relative
+error_factor: 10.0
+error_tolerance: 1.0
+bound_mode: probabilistic
+
+# Conformal
+horizon_quantile: null
+conformal_mode: bins
+conformal_bins: 4
+conformal_min_bin: 5
+conformal_bin_shrinkage: 20.0
+conformal_tie_jitter: 1.0e-6
+conformal_bin_feature: resid
+conformal_cv_folds: 1
+conformal_no_sigma: false
+conformal_feature: pred
+conformal_tree_depth: 4
+conformal_min_leaf: 500
+conformal_tree_bins: 9
+conformal_tree_min_gain: 1.0e-6
+
+# Delta / Expansion
+delta_mode: quantile
+delta_quantile: 0.95
+delta_scale: 3.0
+delta_local: false
+delta_local_k: 20
+delta_local_quantile: null
+delta_local_samples: 500
+horizon_samples: null
+horizon_consecutive_k: 2
+horizon_feature_horizon: 3
+horizon_thin: 1
+horizon_calib_thin: 1
+scale_eps: 1.0e-6
+scale_floor: 1.0e-3
+scale_cap: null
+scale_from_quantiles: true
+scale_quantile_high: 0.9
+scale_cap_quantile: 0.95
+scale_floor_quantile: 0.1
+quantile_ensemble: 3
+quantile_ensemble_stride: 1000
+block_count: 5
+block_quantile: 0.9
+offset_calibration: true
+offset_quantile: null
+horizon_use_jacobian: true
+growth_source: error
+expansion_quantile: 0.95
+expansion_samples: 500
+expansion_theiler: 10
+expansion_dim: null
+expansion_lag: null
+expansion_horizon: 10
+calibrate_coverage: false
+calibration_alpha: 0.1
+calibration_floor: 1.0
+
+# Lyapunov
+lyap_max_t: 25
+lyap_theiler: 10
+lyap_fit_start: 1
+lyap_fit_end: 10
+lyap_dim: null
+lyap_lag: null
+
+# System
+use_cuda: false
+output_dir: outputs
+plot: false
+plot_prefix: horizon
+progress: true
+
+# Physics
+r: 4.0
+x0: 0.2
+dt: 0.01
+integrator: euler
+sigma: 10.0
+rho: 28.0
+beta: 2.6666666666666665
+a: 0.2
+b: 0.2
+c: 5.7
+tau: 17
+mg_beta: 0.2
+gamma: 0.1
+n: 10

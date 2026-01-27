@@ -6,8 +6,13 @@ import sys
 
 import torch
 
-from src.horizon_benchmark_utils import format_value, median_value, parse_list, write_csv_rows
-from src.horizon_experiment import ProgressBar, build_parser, run_experiment
+from src.horizon_benchmark_utils import (
+    format_value,
+    median_value,
+    parse_list,
+    write_csv_rows,
+)
+from src.horizon_experiment import ProgressBar, build_parser, load_config, run_experiment
 
 
 def summarize_records(records, fields):
@@ -21,6 +26,11 @@ def summarize_records(records, fields):
 
 def main():
     """Runs multi-seed evaluation for conformal horizon bounds."""
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", type=str, default="config.yaml")
+    known_args, _ = pre_parser.parse_known_args()
+    config = load_config(known_args.config)
+
     exp_parser = build_parser(add_help=False)
     parser = argparse.ArgumentParser(
         description="Multi-seed evaluation for conformal horizon lower bounds",
@@ -35,6 +45,9 @@ def main():
     parser.add_argument(
         "--output-summary", type=str, default="outputs/horizon_conformal_summary.csv"
     )
+    if config:
+        parser.set_defaults(**config)
+    # Force conformal-eval defaults after config so bound_mode isn't overridden.
     parser.set_defaults(
         bound_mode="horizon_conformal",
         conformal_mode="bins",

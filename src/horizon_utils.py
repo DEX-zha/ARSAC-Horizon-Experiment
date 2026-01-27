@@ -36,22 +36,40 @@ def generate_lorenz(
     x0=1.0,
     y0=1.0,
     z0=1.0,
+    integrator="rk45",
 ):
-    """Generates the x-component of the Lorenz system."""
-    total = length + warmup
-    x = x0
-    y = y0
-    z = z0
-    out = np.empty(total, dtype=np.float64)
-    for i in range(total):
-        dx = sigma * (y - x)
-        dy = x * (rho - z) - y
-        dz = x * y - beta * z
-        x += dx * dt
-        y += dy * dt
-        z += dz * dt
-        out[i] = x
-    return out[warmup:]
+    """Generates the x-component of the Lorenz system using Scipy."""
+    from scipy.integrate import solve_ivp
+
+    def lorenz_deriv(t, state):
+        x, y, z = state
+        return [sigma * (y - x), x * (rho - z) - y, x * y - beta * z]
+
+    total_steps = length + warmup
+    t_span = (0, total_steps * dt)
+    t_eval = np.arange(0, total_steps * dt, dt)
+    
+    # solve_ivp guarantees accuracy but might not match exact steps if we don't be careful.
+    # We use t_eval to get the exact time points we want.
+    
+    sol = solve_ivp(
+        lorenz_deriv,
+        t_span,
+        [x0, y0, z0],
+        t_eval=t_eval,
+        method="RK45",
+        rtol=1e-9, 
+        atol=1e-9
+    )
+    
+    # sol.y has shape (3, n_points)
+    # We want the x-component (index 0)
+    # And we discard the warmup
+    if sol.y.shape[1] < total_steps:
+         # Fallback if solver fails to reach end (unlikely with RK45 on this system)
+         raise RuntimeError("ODE solver failed to generate sufficient points.")
+         
+    return sol.y[0, warmup:]
 
 
 def generate_rossler(
@@ -64,22 +82,33 @@ def generate_rossler(
     x0=1.0,
     y0=0.0,
     z0=0.0,
+    integrator="rk45",
 ):
-    """Generates the x-component of the Rossler system."""
-    total = length + warmup
-    x = x0
-    y = y0
-    z = z0
-    out = np.empty(total, dtype=np.float64)
-    for i in range(total):
-        dx = -y - z
-        dy = x + a * y
-        dz = b + z * (x - c)
-        x += dx * dt
-        y += dy * dt
-        z += dz * dt
-        out[i] = x
-    return out[warmup:]
+    """Generates the x-component of the Rossler system using Scipy."""
+    from scipy.integrate import solve_ivp
+
+    def rossler_deriv(t, state):
+        x, y, z = state
+        return [-y - z, x + a * y, b + z * (x - c)]
+
+    total_steps = length + warmup
+    t_span = (0, total_steps * dt)
+    t_eval = np.arange(0, total_steps * dt, dt)
+
+    sol = solve_ivp(
+        rossler_deriv,
+        t_span,
+        [x0, y0, z0],
+        t_eval=t_eval,
+        method="RK45",
+        rtol=1e-9, 
+        atol=1e-9
+    )
+
+    if sol.y.shape[1] < total_steps:
+         raise RuntimeError("ODE solver failed to generate sufficient points.")
+
+    return sol.y[0, warmup:]
 
 
 def generate_mackey_glass(
@@ -90,15 +119,29 @@ def generate_mackey_glass(
     n=10,
     dt=1.0,
     warmup=200,
+    integrator="euler",
 ):
     """Generates a Mackey-Glass delay differential series."""
     total = length + warmup + tau + 1
     x = np.zeros(total, dtype=np.float64)
     x[: tau + 1] = 1.2
+    integrator = integrator.lower()
     for t in range(tau, total - 1):
         x_tau = x[t - tau]
-        dx = beta * x_tau / (1.0 + x_tau**n) - gamma * x[t]
-        x[t + 1] = x[t] + dx * dt
+        if integrator == "rk4":
+            def mg_rhs(x_val, x_delayed):
+                return beta * x_delayed / (1.0 + x_delayed**n) - gamma * x_val
+
+            k1 = mg_rhs(x[t], x_tau)
+            k2 = mg_rhs(x[t] + 0.5 * dt * k1, x_tau)
+            k3 = mg_rhs(x[t] + 0.5 * dt * k2, x_tau)
+            k4 = mg_rhs(x[t] + dt * k3, x_tau)
+            x[t + 1] = x[t] + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        elif integrator == "euler":
+            dx = beta * x_tau / (1.0 + x_tau**n) - gamma * x[t]
+            x[t + 1] = x[t] + dx * dt
+        else:
+            raise ValueError(f"Unknown integrator: {integrator}")
     return x[tau + 1 + warmup :]
 
 

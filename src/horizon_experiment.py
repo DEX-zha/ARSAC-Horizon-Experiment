@@ -4,8 +4,11 @@ import argparse
 import csv
 import math
 import os
+import sys
 import time
 
+import yaml
+import logging
 import numpy as np
 import torch
 
@@ -34,231 +37,25 @@ from src.horizon_training import (
     train_quantile_mlp,
 )
 from src.horizon_utils import (
+    set_seed, 
     build_supervised,
-    estimate_expansion_quantile,
     estimate_lyapunov,
-    generate_logistic_map,
-    generate_lorenz,
-    generate_mackey_glass,
-    generate_rossler,
-    horizon_from_model_bound_by_growth,
-    set_seed,
-    split_series,
-    standardize_series,
+    estimate_expansion_quantile,
+    horizon_from_model_bound_by_growth
 )
-
-
-def get_series(args):
-    """Generates the selected chaotic time series."""
-    if args.dataset == "logistic":
-        return generate_logistic_map(
-            args.series_len, r=args.r, x0=args.x0, warmup=args.warmup
-        )
-    if args.dataset == "lorenz":
-        return generate_lorenz(
-            args.series_len,
-            dt=args.dt,
-            sigma=args.sigma,
-            rho=args.rho,
-            beta=args.beta,
-            warmup=args.warmup,
-        )
-    if args.dataset == "rossler":
-        return generate_rossler(
-            args.series_len,
-            dt=args.dt,
-            a=args.a,
-            b=args.b,
-            c=args.c,
-            warmup=args.warmup,
-        )
-    if args.dataset == "mackey_glass":
-        return generate_mackey_glass(
-            args.series_len,
-            tau=args.tau,
-            beta=args.mg_beta,
-            gamma=args.gamma,
-            n=args.n,
-            dt=args.dt,
-            warmup=args.warmup,
-        )
-    raise ValueError("Unknown dataset")
-
-
-def select_embedding(args, train_series, val_series, dim_values, lag_values, device):
-    """Selects the best (dim, lag) embedding based on validation criteria."""
-    best = None
-    progress = None
-    if args.progress:
-        progress = ProgressBar(len(dim_values) * len(lag_values), label="embed-search")
-    for dim in dim_values:
-        for lag in lag_values:
-            try:
-                if args.train_multistep and args.model in ("mlp", "lstm"):
-                    x_train, y_train = build_multistep_supervised(
-                        train_series, dim, lag, horizon=args.train_horizon
-                    )
-                    x_val, y_val = build_multistep_supervised(
-                        val_series, dim, lag, horizon=args.train_horizon
-                    )
-                else:
-                    x_train, y_train = build_supervised(
-                        train_series, dim, lag, horizon=1
-                    )
-                    x_val, y_val = build_supervised(val_series, dim, lag, horizon=1)
-            except ValueError:
-                if progress:
-                    progress.update(1, extra=f"dim={dim} lag={lag}")
-                continue
-
-            if args.model == "linear":
-                model = LinearAR(reg=args.linear_reg).fit(x_train, y_train)
-                val_loss = evaluate_mse(model, x_val, y_val)
-                wrapped = model
-            elif args.model == "mlp":
-                if args.train_multistep:
-                    model, val_loss = train_mlp_multistep(
-                        x_train,
-                        y_train,
-                        x_val,
-                        y_val,
-                        input_dim=dim,
-                        hidden_dim=args.mlp_hidden,
-                        epochs=args.mlp_epochs,
-                        lr=args.mlp_lr,
-                        batch_size=args.mlp_batch,
-                        patience=args.mlp_patience,
-                        tf_start=args.tf_start,
-                        tf_end=args.tf_end,
-                        tf_val=args.tf_val,
-                        device=device,
-                        show_progress=False,
-                    )
-                else:
-                    model, val_loss = train_mlp(
-                        x_train,
-                        y_train,
-                        x_val,
-                        y_val,
-                        input_dim=dim,
-                        hidden_dim=args.mlp_hidden,
-                        epochs=args.mlp_epochs,
-                        lr=args.mlp_lr,
-                        batch_size=args.mlp_batch,
-                        patience=args.mlp_patience,
-                        device=device,
-                        show_progress=False,
-                    )
-                wrapped = TorchWrapper(model, device)
-            else:
-                if args.train_multistep:
-                    model, val_loss = train_lstm_multistep(
-                        x_train,
-                        y_train,
-                        x_val,
-                        y_val,
-                        hidden_dim=args.lstm_hidden,
-                        num_layers=args.lstm_layers,
-                        epochs=args.lstm_epochs,
-                        lr=args.lstm_lr,
-                        batch_size=args.lstm_batch,
-                        patience=args.lstm_patience,
-                        tf_start=args.tf_start,
-                        tf_end=args.tf_end,
-                        tf_val=args.tf_val,
-                        device=device,
-                        show_progress=False,
-                    )
-                else:
-                    model, val_loss = train_lstm(
-                        x_train,
-                        y_train,
-                        x_val,
-                        y_val,
-                        hidden_dim=args.lstm_hidden,
-                        num_layers=args.lstm_layers,
-                        epochs=args.lstm_epochs,
-                        lr=args.lstm_lr,
-                        batch_size=args.lstm_batch,
-                        patience=args.lstm_patience,
-                        device=device,
-                        show_progress=False,
-                    )
-                wrapped = TorchSeqWrapper(model, device)
-
-            selection = {
-                "metric": args.selection_metric,
-                "score": -val_loss,
-                "horizon": None,
-            }
-            if args.selection_metric == "horizon":
-                rmse_val = rolling_rmse(
-                    wrapped, val_series, dim, lag, args.selection_horizon_max
-                )
-                base_err = rmse_val[0] if rmse_val.size > 0 else 0.0
-                if args.error_mode == "relative":
-                    tolerance = base_err * args.error_factor
-                else:
-                    tolerance = args.error_tolerance
-                if not np.isfinite(tolerance) or tolerance <= 0:
-                    horizon_val = 0
-                else:
-                    horizon_val = horizon_from_rmse(rmse_val, tolerance)
-                selection["score"] = horizon_val
-                selection["horizon"] = horizon_val
-
-            if best is None:
-                best = {
-                    "dim": dim,
-                    "lag": lag,
-                    "val_loss": val_loss,
-                    "model": wrapped,
-                    "selection": selection,
-                }
-                if progress:
-                    progress.update(
-                        1,
-                        extra=f"dim={dim} lag={lag} val={val_loss:.4f}",
-                    )
-                continue
-
-            if args.selection_metric == "horizon":
-                if selection["score"] > best["selection"]["score"]:
-                    best = {
-                        "dim": dim,
-                        "lag": lag,
-                        "val_loss": val_loss,
-                        "model": wrapped,
-                        "selection": selection,
-                    }
-                elif selection["score"] == best["selection"]["score"]:
-                    if val_loss < best["val_loss"]:
-                        best = {
-                            "dim": dim,
-                            "lag": lag,
-                            "val_loss": val_loss,
-                            "model": wrapped,
-                            "selection": selection,
-                        }
-            else:
-                if val_loss < best["val_loss"]:
-                    best = {
-                        "dim": dim,
-                        "lag": lag,
-                        "val_loss": val_loss,
-                        "model": wrapped,
-                        "selection": selection,
-                    }
-            if progress:
-                extra = f"dim={dim} lag={lag} val={val_loss:.4f}"
-                if selection["horizon"] is not None:
-                    extra += f" h={selection['horizon']}"
-                progress.update(1, extra=extra)
-    if best is None:
-        raise RuntimeError("No valid embedding configuration found.")
-    if progress:
-        progress.close()
-    return best
+from src.horizon_data import DataManager
+from src.horizon_forecast import Forecaster
+from src.horizon_calibration import (
+    ConformalTreeEstimator, 
+    conformal_quantile,
+    block_conformal_margin,
+    fit_mondrian_bins,
+    compute_bin_edges,
+    extract_bin_features,
+    predict_quantile_ensemble,
+    predict_sigma_quantile_ensemble,
+    predict_sigma_mlp
+)
 
 
 def train_final_model(
@@ -604,6 +401,43 @@ def assign_bin_ids(features, edges_list):
     return group_ids, max(1, multiplier)
 
 
+class ConformalTreeEstimator:
+    """Wraps Scikit-Learn DecisionTree for quantile prediction."""
+    def __init__(self, min_samples_leaf, max_depth, min_gain=0.0):
+        from sklearn.tree import DecisionTreeRegressor
+        self.tree = DecisionTreeRegressor(
+            min_samples_leaf=min_samples_leaf,
+            max_depth=max_depth,
+            min_impurity_decrease=min_gain
+        )
+        self.leaf_quantiles = {}
+        self.global_fallback = 0.0
+
+    def fit(self, X, y, alpha, rng=None, tie_jitter=0.0):
+        # We fit logic to minimize variance (standard CART), then compute quantiles in leaves
+        self.tree.fit(X, y)
+        leaf_ids = self.tree.apply(X)
+        unique_leaves = np.unique(leaf_ids)
+        
+        # Global fallback if needed
+        self.global_fallback = conformal_quantile(y, alpha, rng=rng, tie_jitter=tie_jitter)
+
+        for leaf in unique_leaves:
+            mask = leaf_ids == leaf
+            leaf_y = y[mask]
+            self.leaf_quantiles[leaf] = conformal_quantile(
+                leaf_y, alpha, rng=rng, tie_jitter=tie_jitter
+            )
+
+    def predict(self, X):
+        leaf_ids = self.tree.apply(X)
+        # Vectorized map approach
+        return np.array([self.leaf_quantiles.get(l, self.global_fallback) for l in leaf_ids])
+
+    def apply(self, X):
+        return self.tree.apply(X)
+
+
 def fit_mondrian_bins(
     features,
     scores,
@@ -642,185 +476,7 @@ def fit_mondrian_bins(
     return c_groups, group_ids, counts
 
 
-def _best_tree_split(features, split_scores, min_leaf, max_bins, min_gain):
-    best = None
-    n, d = features.shape
-    if n < 2 * min_leaf:
-        return None
-    parent_var = float(np.var(split_scores) * n)
-    for col in range(d):
-        values = features[:, col]
-        if not np.isfinite(values).any():
-            continue
-        if np.all(values == values[0]):
-            continue
-        quantiles = np.linspace(0.1, 0.9, max_bins)
-        thresholds = np.unique(np.quantile(values, quantiles))
-        for threshold in thresholds:
-            left_mask = values <= threshold
-            left_count = int(np.sum(left_mask))
-            right_count = n - left_count
-            if left_count < min_leaf or right_count < min_leaf:
-                continue
-            left_scores = split_scores[left_mask]
-            right_scores = split_scores[~left_mask]
-            left_var = float(np.var(left_scores) * left_count)
-            right_var = float(np.var(right_scores) * right_count)
-            gain = parent_var - (left_var + right_var)
-            if gain <= min_gain:
-                continue
-            cost = -gain
-            if best is None or cost < best["cost"]:
-                best = {
-                    "feature": col,
-                    "threshold": float(threshold),
-                    "left_mask": left_mask,
-                    "cost": cost,
-                }
-    return best
 
-
-def build_conformal_tree(
-    features,
-    scores,
-    split_scores=None,
-    max_depth=4,
-    min_leaf=500,
-    max_bins=9,
-    min_gain=1e-6,
-):
-    """Builds a shallow CART-style tree to partition conformal scores."""
-    features = np.asarray(features, dtype=np.float64)
-    scores = np.asarray(scores, dtype=np.float64)
-    if split_scores is None:
-        split_scores = scores
-    split_scores = np.asarray(split_scores, dtype=np.float64)
-
-    root = {
-        "indices": np.arange(features.shape[0], dtype=np.int64),
-        "depth": 0,
-        "parent": None,
-        "feature": None,
-        "threshold": None,
-        "left": None,
-        "right": None,
-        "size": int(features.shape[0]),
-        "c": 0.0,
-        "leaf_id": None,
-    }
-
-    def split(node):
-        idx = node["indices"]
-        if node["depth"] >= max_depth:
-            return
-        if idx.size < 2 * min_leaf:
-            return
-        sub_features = features[idx]
-        sub_scores = split_scores[idx]
-        best = _best_tree_split(
-            sub_features,
-            sub_scores,
-            min_leaf,
-            max_bins,
-            min_gain,
-        )
-        if best is None:
-            return
-        left_idx = idx[best["left_mask"]]
-        right_idx = idx[~best["left_mask"]]
-        node["feature"] = best["feature"]
-        node["threshold"] = best["threshold"]
-        node["left"] = {
-            "indices": left_idx,
-            "depth": node["depth"] + 1,
-            "parent": node,
-            "feature": None,
-            "threshold": None,
-            "left": None,
-            "right": None,
-            "size": int(left_idx.size),
-            "c": 0.0,
-            "leaf_id": None,
-        }
-        node["right"] = {
-            "indices": right_idx,
-            "depth": node["depth"] + 1,
-            "parent": node,
-            "feature": None,
-            "threshold": None,
-            "left": None,
-            "right": None,
-            "size": int(right_idx.size),
-            "c": 0.0,
-            "leaf_id": None,
-        }
-        split(node["left"])
-        split(node["right"])
-
-    split(root)
-    return root
-
-
-def assign_tree_constants(node, scores, alpha, rng=None, tie_jitter=0.0):
-    """Assigns conformal constants to every node (used for fallback)."""
-    idx = node["indices"]
-    node["size"] = int(idx.size)
-    node["c"] = (
-        conformal_quantile(scores[idx], alpha, rng=rng, tie_jitter=tie_jitter)
-        if idx.size
-        else 0.0
-    )
-    if node["left"] is not None:
-        assign_tree_constants(node["left"], scores, alpha, rng=rng, tie_jitter=tie_jitter)
-    if node["right"] is not None:
-        assign_tree_constants(
-            node["right"], scores, alpha, rng=rng, tie_jitter=tie_jitter
-        )
-
-
-def assign_leaf_ids(node, start=0):
-    """Assigns sequential leaf ids for coverage diagnostics."""
-    if node["left"] is None and node["right"] is None:
-        node["leaf_id"] = start
-        return start + 1
-    next_id = start
-    if node["left"] is not None:
-        next_id = assign_leaf_ids(node["left"], next_id)
-    if node["right"] is not None:
-        next_id = assign_leaf_ids(node["right"], next_id)
-    return next_id
-
-
-def predict_tree_constants(node, features, min_leaf, fallback):
-    """Predicts per-sample conformal constants with leaf fallback."""
-    features = np.asarray(features, dtype=np.float64)
-    constants = np.zeros(features.shape[0], dtype=np.float64)
-    for i in range(features.shape[0]):
-        current = node
-        while current["left"] is not None and current["right"] is not None:
-            if features[i, current["feature"]] <= current["threshold"]:
-                current = current["left"]
-            else:
-                current = current["right"]
-        while current.get("parent") is not None and current["size"] < min_leaf:
-            current = current["parent"]
-        constants[i] = current.get("c", fallback)
-    return constants
-
-
-def predict_leaf_ids(node, features):
-    """Returns leaf ids for each sample."""
-    features = np.asarray(features, dtype=np.float64)
-    leaf_ids = np.zeros(features.shape[0], dtype=np.int64)
-    for i in range(features.shape[0]):
-        current = node
-        while current["left"] is not None and current["right"] is not None:
-            if features[i, current["feature"]] <= current["threshold"]:
-                current = current["left"]
-            else:
-                current = current["right"]
-        leaf_ids[i] = int(current.get("leaf_id", -1))
-    return leaf_ids
 
 
 def extract_bin_features(x_raw, dim, mode):
@@ -840,40 +496,21 @@ def run_experiment(args):
     """Runs a full horizon experiment and writes summary CSV output."""
     set_seed(args.seed)
     device = torch.device("cuda" if args.use_cuda and torch.cuda.is_available() else "cpu")
-    series = get_series(args)
-
-    train_raw, val_raw, calib_raw, test_raw = split_series(
-        series,
-        train_ratio=args.train_ratio,
-        val_ratio=args.val_ratio,
-        calib_ratio=args.calib_ratio,
-    )
-    train_std, mean, std = standardize_series(train_raw)
-    val_std = (val_raw - mean) / std
-    calib_std = (calib_raw - mean) / std if calib_raw.size else val_std
-    test_std = (test_raw - mean) / std
+    
+    # --- DATA LOADING AND PREPARATION ---
+    data_manager = DataManager(args)
+    train_std, val_std, calib_std, test_std = data_manager.prepare_data()
+    train_raw, val_raw, calib_raw, test_raw = data_manager.get_raw_splits()
 
     dim_values = list(range(args.dim_min, args.dim_max + 1))
     lag_values = list(range(args.lag_min, args.lag_max + 1))
 
     t0 = time.time()
-    best = select_embedding(
-        args,
-        train_std,
-        val_std,
-        dim_values,
-        lag_values,
-        device,
-    )
-    model = train_final_model(
-        args,
-        train_std,
-        val_std,
-        best["dim"],
-        best["lag"],
-        device,
-        show_progress=args.progress,
-    )
+    
+    # --- MODEL TRAINING ---
+    forecaster = Forecaster(args, device)
+    best = forecaster.select_embedding(train_std, val_std)
+    model = forecaster.train_final_model(train_std, val_std)
 
     x_test, y_test = build_supervised(test_std, best["dim"], best["lag"], horizon=1)
     test_mse = evaluate_mse(model, x_test, y_test, device=device)
@@ -958,6 +595,14 @@ def run_experiment(args):
     pred_calib_med = None
     y_calib_med = None
     l_calib_med = None
+    bin_count = None
+    bin_min_count = None
+    bin_med_count = None
+    bin_c_min = None
+    bin_c_med = None
+    bin_c_max = None
+
+    c_global = 0.0
     bin_count = None
     bin_min_count = None
     bin_med_count = None
@@ -1405,26 +1050,40 @@ def run_experiment(args):
                         pred_var_calib,
                     ]
                 )
-                tree = build_conformal_tree(
-                    tree_features_calib,
-                    scores,
-                    split_scores=split_scores,
+                tree = ConformalTreeEstimator(
+                    min_samples_leaf=min_leaf_eff,
                     max_depth=args.conformal_tree_depth,
-                    min_leaf=min_leaf_eff,
-                    max_bins=args.conformal_tree_bins,
-                    min_gain=args.conformal_tree_min_gain,
+                    min_gain=args.conformal_tree_min_gain
                 )
-                assign_tree_constants(
-                    tree,
+                tree.fit(
+                    tree_features_calib,
                     scores,
                     args.calibration_alpha,
                     rng=tie_rng,
-                    tie_jitter=args.conformal_tie_jitter,
+                    tie_jitter=args.conformal_tie_jitter
                 )
-                assign_leaf_ids(tree)
-                c_calib = predict_tree_constants(
-                    tree, tree_features_calib, min_leaf_eff, c_global
-                )
+                c_calib = tree.predict(tree_features_calib)
+                
+                # Apply to Test Set
+                if x_test_raw.size and pred_test.size:
+                     jac_test = x_test_raw[:, jac_idx]
+                     jac_log_test = x_test_raw[:, jac_log_idx]
+                     resid_test = x_test_raw[:, resid_idx]
+                     err_var_test = x_test_raw[:, err_var_idx]
+                     pred_var_test = x_test_raw[:, pred_var_idx]
+                     
+                     tree_features_test = np.column_stack([
+                        pred_test, sigma_test, jac_test, jac_log_test, 
+                        resid_test, err_var_test, pred_var_test
+                     ])
+                     
+                     c_test = tree.predict(tree_features_test)
+                     leaf_ids = tree.apply(tree_features_test)
+                     
+                     if use_sigma:
+                         pred_test_cal = pred_test - c_test * sigma_test
+                     else:
+                         pred_test_cal = pred_test - c_test
             elif args.conformal_mode == "bins":
                 bin_features_train = extract_bin_features(
                     x_train_raw, best["dim"], args.conformal_bin_feature
@@ -1931,7 +1590,8 @@ def run_experiment(args):
             rmse_path,
         )
         plot_log_divergence(rmse_by_h, lyap_step, log_path)
-        print(f"Plots saved to {rmse_path} and {log_path}")
+        plot_log_divergence(rmse_by_h, lyap_step, log_path)
+        logging.info(f"Plots saved to {rmse_path} and {log_path}")
 
     elapsed = time.time() - t0
     selection_note = ""
@@ -1943,7 +1603,7 @@ def run_experiment(args):
             f" h_win_med={horizon_window_median:.2f}"
             f" h_win_mean={horizon_window_mean:.2f}"
         )
-    print(
+    logging.info(
         f"Best dim={best['dim']} lag={best['lag']} val={best['val_loss']:.6f} "
         f"test={test_mse:.6f} lyap_step={lyap_step:.4f} lyap_time={lyap_time:.4f} "
         f"horizon_real={horizon_real} horizon_real_time={horizon_real_time:.2f} "
@@ -2238,6 +1898,12 @@ def build_parser(add_help=True):
     parser.add_argument("--x0", type=float, default=0.2)
 
     parser.add_argument("--dt", type=float, default=0.01)
+    parser.add_argument(
+        "--integrator",
+        type=str,
+        choices=["euler", "rk4"],
+        default="euler",
+    )
     parser.add_argument("--sigma", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=28.0)
     parser.add_argument("--beta", type=float, default=8.0 / 3.0)
@@ -2250,13 +1916,55 @@ def build_parser(add_help=True):
     parser.add_argument("--mg-beta", type=float, default=0.2)
     parser.add_argument("--gamma", type=float, default=0.1)
     parser.add_argument("--n", type=int, default=10)
+    parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config file")
     return parser
+
+
+def load_config(config_path):
+    """Loads configuration from a YAML file."""
+    if not os.path.exists(config_path):
+        return {}
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
+
+
+def setup_logging(output_dir, log_file="experiment.log"):
+    """Sets up logging to console and file."""
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, log_file)
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler(log_path),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    logging.info(f"Logging configured. Output: {log_path}")
 
 
 def main():
     """CLI entry point."""
+    # 1. Parse ONLY --config first to get the path
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", type=str, default="config.yaml")
+    known_args, _ = pre_parser.parse_known_args()
+    
+    # 2. Load YAML config
+    config = load_config(known_args.config)
+    
+    # 3. Build main parser and set defaults from config
     parser = build_parser()
+    parser.set_defaults(**config)
+    
+    # 4. Parse full args (CLI overrides config defaults)
     args = parser.parse_args()
+    
+    # 5. Setup Logging
+    setup_logging(args.output_dir)
+    logging.info(f"Loaded configuration from {known_args.config}")
+    
     run_experiment(args)
 
 
