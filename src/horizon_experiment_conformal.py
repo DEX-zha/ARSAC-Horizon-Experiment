@@ -25,7 +25,7 @@ def _run_conformal(ctx, base, lyap, stats, dt):
     if preds.pred_calib.size:
         model = _calibrate_conformal(ctx, sets, preds, use_sigma, ctx.constants, stats)
     pred_test_cal, leaf_ids = _test_conformal(ctx, sets, preds, model, use_sigma, ctx.constants, stats)
-    _extra_conformal_stats(pred_test_cal, leaf_ids, sets, ctx.constants, stats, ctx.best)
+    _extra_conformal_stats(pred_test_cal, leaf_ids, sets, ctx.constants, stats, ctx.best, ctx.args)
     return _finalize_conformal(stats, dt, ctx.args)
 
 

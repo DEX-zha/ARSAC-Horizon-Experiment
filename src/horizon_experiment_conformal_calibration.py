@@ -213,6 +213,66 @@ def _calib_stats(l_calib, y_calib):
     return float(np.median(l_calib)), coverage, int(len(y_calib))
 
 
+def _coverage_guard(l_calib, y_calib, args):
+    if not l_calib.size or not y_calib.size:
+        return 0.0
+    z = l_calib - y_calib
+    alpha = float(args.calibration_alpha)
+    guard_quantile = args.coverage_guard_quantile
+    if guard_quantile is None:
+        guard_quantile = 1.0 - alpha
+    guard_quantile = float(min(max(guard_quantile, 0.0), 1.0))
+    block_count = max(1, int(args.block_count))
+    if block_count <= 1 or z.size <= 1:
+        return float(np.quantile(z, 1.0 - alpha))
+    block_count = min(block_count, z.size)
+    block_size = max(1, z.size // block_count)
+    guards = []
+    for i in range(block_count):
+        start = i * block_size
+        end = z.size if i == block_count - 1 else start + block_size
+        block = z[start:end]
+        if block.size:
+            guards.append(float(np.quantile(block, 1.0 - alpha)))
+    if not guards:
+        return float(np.quantile(z, 1.0 - alpha))
+    return float(np.quantile(np.asarray(guards, dtype=np.float64), guard_quantile))
+
+
+def _bin_guard_groups(z, bin_ids, group_count, args, global_guard):
+    if group_count <= 0:
+        return np.array([], dtype=np.float64)
+    guards = np.full(group_count, global_guard, dtype=np.float64)
+    counts = np.bincount(bin_ids, minlength=group_count)
+    alpha = float(args.calibration_alpha)
+    guard_quantile = args.coverage_guard_quantile
+    if guard_quantile is None:
+        guard_quantile = 1.0 - alpha
+    guard_quantile = float(min(max(guard_quantile, 0.0), 1.0))
+    for gid in range(group_count):
+        count = int(counts[gid])
+        if count < args.conformal_min_bin:
+            continue
+        z_g = z[bin_ids == gid]
+        if z_g.size == 0:
+            continue
+        guard = float(
+            block_conformal_margin(
+                z_g,
+                args.calibration_alpha,
+                args.block_count,
+                block_quantile=guard_quantile,
+                rng=None,
+                tie_jitter=args.conformal_tie_jitter,
+            )
+        )
+        if args.conformal_bin_shrinkage > 0:
+            weight = count / (count + float(args.conformal_bin_shrinkage))
+            guard = weight * guard + (1.0 - weight) * global_guard
+        guards[gid] = guard
+    return guards
+
+
 
 def _fit_conformal_model(ctx, sets, preds, scores, use_sigma, constants, rng, stats):
     if ctx.args.conformal_mode == "tree":
@@ -230,10 +290,14 @@ def _fit_conformal_model(ctx, sets, preds, scores, use_sigma, constants, rng, st
 def _conformal_c_test(model, preds, sets, constants, ctx):
     if model.mode == "tree" and model.tree is not None:
         c_test, leaf_ids = _predict_tree_c(model.tree, preds.pred_test, preds.sigma_test, sets.x_test_raw, ctx.best)
-        return c_test, leaf_ids
+        return c_test, leaf_ids, None
     if model.mode == "bins" and model.bin_model is not None:
-        return _predict_bin_c(model.bin_model, preds.pred_test, sets.x_test_raw, ctx.args, ctx.best, model.c_global)
-    return np.full_like(preds.pred_test, model.c_global), None
+        c_test, bin_ids = _predict_bin_c(model.bin_model, preds.pred_test, sets.x_test_raw, ctx.args, ctx.best, model.c_global)
+        guard = None
+        if "guard_groups" in model.bin_model and bin_ids is not None and bin_ids.size:
+            guard = model.bin_model["guard_groups"][bin_ids]
+        return c_test, bin_ids, guard
+    return np.full_like(preds.pred_test, model.c_global), None, None
 
 
 
@@ -245,6 +309,54 @@ def _calibrate_conformal(ctx, sets, preds, use_sigma, constants, stats):
     stats["c_global"] = _global_margin(scores, ctx.args, rng)
     model, c_calib = _fit_conformal_model(ctx, sets, preds, scores, use_sigma, constants, rng, stats)
     l_calib = _calib_interval(preds.pred_calib, c_calib, preds.sigma_calib, use_sigma, ctx.args, constants)
+    coverage_pre = None
+    if l_calib.size and sets.y_calib.size:
+        coverage_pre = float(np.mean(sets.y_calib >= l_calib))
+    target = 1.0 - float(ctx.args.calibration_alpha)
+    guard = 0.0
+    guard_scale = 0.0
+    guard_raw = 0.0
+    if l_calib.size and sets.y_calib.size:
+        guard_raw = _coverage_guard(l_calib, sets.y_calib, ctx.args)
+    min_scale = float(getattr(ctx.args, "coverage_guard_min_scale", 0.0))
+    if coverage_pre is None:
+        guard_scale = max(min_scale, 1.0)
+    else:
+        margin = float(getattr(ctx.args, "coverage_guard_margin", 0.02))
+        if margin <= 0.0:
+            base_scale = 1.0
+        else:
+            gap = max(0.0, target - coverage_pre)
+            base_scale = min(1.0, gap / margin)
+        guard_scale = max(min_scale, base_scale)
+    guard = guard_raw * guard_scale
+    apply_guard = guard != 0.0
+    stats["coverage_guard"] = guard
+    if apply_guard and ctx.args.conformal_mode == "bins" and model.bin_model is not None:
+        bin_features = _bin_features(ctx.args, sets.x_calib_raw, ctx.best)
+        bin_ids, group_count = assign_bin_ids(bin_features, model.bin_model["edges"])
+        if bin_ids.size:
+            z = l_calib - sets.y_calib
+            guard_groups = _bin_guard_groups(z, bin_ids, group_count, ctx.args, guard_raw)
+            guard_groups = guard_groups * guard_scale
+            model.bin_model["guard_groups"] = guard_groups
+            l_calib = _clip_horizon(l_calib - guard_groups[bin_ids], ctx.args, constants)
+        elif guard != 0.0:
+            l_calib = _clip_horizon(l_calib - guard, ctx.args, constants)
+    elif apply_guard:
+        l_calib = _clip_horizon(l_calib - guard, ctx.args, constants)
+    debias_delta = 0.0
+    debias_q = ctx.args.debias_quantile
+    if debias_q is None:
+        debias_q = target
+    debias_q = float(min(max(debias_q, 0.0), 1.0))
+    if ctx.args.debias_scale > 0.0 and l_calib.size and sets.y_calib.size:
+        z = l_calib - sets.y_calib
+        debias_delta = float(np.quantile(z, debias_q)) * float(ctx.args.debias_scale)
+        if np.isfinite(debias_delta) and debias_delta != 0.0:
+            l_calib = _clip_horizon(l_calib - debias_delta, ctx.args, constants)
+    stats["debias_delta"] = debias_delta
+    stats["debias_quantile"] = debias_q
     l_med, coverage, samples = _calib_stats(l_calib, sets.y_calib)
     stats["l_calib_med"] = l_med
     stats["coverage"] = coverage

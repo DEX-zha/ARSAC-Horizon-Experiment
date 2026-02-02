@@ -46,6 +46,8 @@ DEFAULT_STATS: Dict[str, Any] = {
     "tightness_ratio": None,
     "slack_median": None,
     "slack_p90": None,
+    "p_sat_calib": None,
+    "p_sat_test": None,
     "leaf_coverage_stats": None,
     "jac_quantile_coverages": None,
     "score_pos_frac": None,
@@ -69,6 +71,11 @@ DEFAULT_STATS: Dict[str, Any] = {
     "bin_c_med": None,
     "bin_c_max": None,
     "c_global": 0.0,
+    "coverage_guard": 0.0,
+    "debias_delta": 0.0,
+    "debias_quantile": None,
+    "predictability_corr_jac": None,
+    "predictability_corr_resid": None,
 }
 
 @dataclass

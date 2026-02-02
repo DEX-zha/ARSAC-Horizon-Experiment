@@ -148,6 +148,11 @@ def build_parser(add_help=True):
     parser.add_argument("--quantile-ensemble-stride", type=int, default=1000)
     parser.add_argument("--block-count", type=int, default=5)
     parser.add_argument("--block-quantile", type=float, default=0.9)
+    parser.add_argument("--coverage-guard-quantile", type=float, default=None)
+    parser.add_argument("--coverage-guard-margin", type=float, default=0.02)
+    parser.add_argument("--coverage-guard-min-scale", type=float, default=0.0)
+    parser.add_argument("--debias-scale", type=float, default=0.0)
+    parser.add_argument("--debias-quantile", type=float, default=None)
     parser.add_argument(
         "--offset-calibration",
         dest="offset_calibration",
@@ -198,6 +203,7 @@ def build_parser(add_help=True):
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--plot-prefix", type=str, default="horizon")
+    parser.add_argument("--predictability-map", action="store_true", default=False)
     parser.add_argument("--progress", action="store_true", default=True)
     parser.add_argument("--no-progress", dest="progress", action="store_false")
 

@@ -194,14 +194,10 @@ def predict_quantile_ensemble(
     device,
     seed_base,
 ):
-    """Trains an ensemble of quantile models and averages their predictions."""
+    """Trains an ensemble of quantile models and aggregates their predictions."""
     members = max(1, int(args.quantile_ensemble))
-    pred_calib = (
-        np.zeros(x_calib.shape[0], dtype=np.float64) if x_calib.size else np.array([])
-    )
-    pred_test = (
-        np.zeros(x_test.shape[0], dtype=np.float64) if x_test.size else np.array([])
-    )
+    calib_preds = []
+    test_preds = []
     for m in range(members):
         set_seed(seed_base + m * args.quantile_ensemble_stride)
         model, _ = train_quantile_mlp(
@@ -221,13 +217,17 @@ def predict_quantile_ensemble(
         )
         wrapper = TorchWrapper(model, device)
         if x_calib.size:
-            pred_calib += wrapper.predict_batch(x_calib).reshape(-1)
+            calib_preds.append(wrapper.predict_batch(x_calib).reshape(-1))
         if x_test.size:
-            pred_test += wrapper.predict_batch(x_test).reshape(-1)
-    if pred_calib.size:
-        pred_calib = pred_calib / float(members)
-    if pred_test.size:
-        pred_test = pred_test / float(members)
+            test_preds.append(wrapper.predict_batch(x_test).reshape(-1))
+    if calib_preds:
+        pred_calib = np.median(np.stack(calib_preds, axis=0), axis=0)
+    else:
+        pred_calib = np.array([])
+    if test_preds:
+        pred_test = np.median(np.stack(test_preds, axis=0), axis=0)
+    else:
+        pred_test = np.array([])
     return pred_calib, pred_test
 
 

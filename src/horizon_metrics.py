@@ -219,6 +219,43 @@ def estimate_jacobian_growth(
     if not norms:
         return 1.0, 1.0, np.array([], dtype=np.float64)
 
+
+def _predict_one_step(model, x):
+    if hasattr(model, "predict"):
+        return float(model.predict(x))
+    if hasattr(model, "predict_batch"):
+        return float(model.predict_batch(np.asarray([x], dtype=np.float64)).reshape(-1)[0])
+    raise ValueError("Model does not support prediction API.")
+
+
+def gated_rollout(model, series_std, dim, lag, l_values, horizon_max=None):
+    """Rolls out predictions up to floor(L(x)) for each window; stops afterward."""
+    series_std = np.asarray(series_std, dtype=np.float64)
+    l_values = np.asarray(l_values, dtype=np.float64)
+    window_len = (dim - 1) * lag + 1
+    n = len(series_std) - window_len - 1
+    if n <= 0 or l_values.size == 0:
+        return [], np.array([], dtype=np.int64)
+    n = min(n, l_values.size)
+    paths = []
+    horizons = []
+    for start in range(n):
+        max_h = int(np.floor(l_values[start]))
+        if horizon_max is not None:
+            max_h = min(max_h, int(horizon_max))
+        max_h = max(0, max_h)
+        history = list(series_std[start : start + window_len])
+        preds = []
+        for _ in range(max_h):
+            x = [history[i * lag] for i in range(dim)]
+            pred = _predict_one_step(model, np.asarray(x, dtype=np.float64))
+            preds.append(pred)
+            history.append(pred)
+            history.pop(0)
+        paths.append(np.asarray(preds, dtype=np.float64))
+        horizons.append(max_h)
+    return paths, np.asarray(horizons, dtype=np.int64)
+
     norms = np.asarray(norms, dtype=np.float64)
     norm_q = float(np.quantile(norms, quantile))
     norm_mean = float(np.mean(norms))

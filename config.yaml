@@ -4,11 +4,11 @@
 # Dataset
 dataset: lorenz
 series_len: 4000
-warmup: 1000
+warmup: 200
 seed: 0
-train_ratio: 0.7
+train_ratio: 0.6
 val_ratio: 0.15
-calib_ratio: 0.05
+calib_ratio: 0.2
 
 # Embedding Search
 dim_min: 2
@@ -41,7 +41,7 @@ lstm_batch: 64
 lstm_patience: 12
 
 # Selection
-horizon_max: 50
+horizon_max: 30
 selection_metric: val_mse
 selection_horizon_max: 20
 
@@ -49,12 +49,12 @@ selection_horizon_max: 20
 error_mode: relative
 error_factor: 10.0
 error_tolerance: 1.0
-bound_mode: probabilistic
+bound_mode: horizon_conformal
 
 # Conformal
-horizon_quantile: null
+horizon_quantile: 0.10
 conformal_mode: bins
-conformal_bins: 4
+conformal_bins: 2
 conformal_min_bin: 5
 conformal_bin_shrinkage: 20.0
 conformal_tie_jitter: 1.0e-6
@@ -75,7 +75,7 @@ delta_local: false
 delta_local_k: 20
 delta_local_quantile: null
 delta_local_samples: 500
-horizon_samples: null
+horizon_samples: 1200
 horizon_consecutive_k: 2
 horizon_feature_horizon: 3
 horizon_thin: 1
@@ -85,13 +85,18 @@ scale_floor: 1.0e-3
 scale_cap: null
 scale_from_quantiles: true
 scale_quantile_high: 0.9
-scale_cap_quantile: 0.95
+scale_cap_quantile: 0.98
 scale_floor_quantile: 0.1
 quantile_ensemble: 3
 quantile_ensemble_stride: 1000
-block_count: 5
+block_count: 10
 block_quantile: 0.9
-offset_calibration: true
+coverage_guard_quantile: 0.80
+coverage_guard_margin: 0.02
+coverage_guard_min_scale: 0.25
+debias_scale: 0.4
+debias_quantile: 0.95
+offset_calibration: false
 offset_quantile: null
 horizon_use_jacobian: true
 growth_source: error
@@ -102,7 +107,7 @@ expansion_dim: null
 expansion_lag: null
 expansion_horizon: 10
 calibrate_coverage: false
-calibration_alpha: 0.1
+calibration_alpha: 0.05
 calibration_floor: 1.0
 
 # Lyapunov
@@ -114,7 +119,7 @@ lyap_dim: null
 lyap_lag: null
 
 # System
-use_cuda: false
+use_cuda: true
 output_dir: outputs
 plot: false
 plot_prefix: horizon
@@ -124,7 +129,7 @@ progress: true
 r: 4.0
 x0: 0.2
 dt: 0.01
-integrator: euler
+integrator: rk4
 sigma: 10.0
 rho: 28.0
 beta: 2.6666666666666665

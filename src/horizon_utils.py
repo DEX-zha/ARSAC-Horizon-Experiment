@@ -304,6 +304,16 @@ def build_supervised(series, dim, lag, horizon=1):
     return x, y
 
 
+def adaptive_horizon(lower_bound, horizon_max):
+    """Clamp a lower-bound horizon to an integer in [1, horizon_max]."""
+    if horizon_max is None:
+        raise ValueError("horizon_max must be provided")
+    if np.isscalar(lower_bound):
+        return int(np.clip(np.floor(lower_bound), 1, horizon_max))
+    lower_bound = np.asarray(lower_bound, dtype=np.float64)
+    return np.clip(np.floor(lower_bound), 1, horizon_max).astype(np.int64)
+
+
 def estimate_lyapunov(
     series,
     dim,
