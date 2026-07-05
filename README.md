@@ -145,7 +145,30 @@ python studies/demo_real_data.py   # 277 years of monthly sunspots (data include
 
 python studies/demo_bidmc.py       # ICU biosignals (PPG + ECG @ 125 Hz, PhysioNet BIDMC)
 # PPG: trust bound 101 ms, coverage 0.897 · regime quasi-periodic → R correctly withheld
+
+python studies/demo_energy.py      # AEP hourly grid load, 3 years (Kaggle/PJM)
+# learned model: 6.3 h of guaranteed trust vs 3.2 h for the seasonal-naive baseline
+# coverage 0.92 / 0.95 (target 0.90, α-margin remedy applied)
 ```
+
+### Case study: grid load — model comparison in guaranteed hours
+
+<div align="center">
+<img src="assets/energy_demo.png" alt="AEP hourly load: guaranteed trust hours, learned forecaster vs seasonal-naive baseline" width="780"/>
+</div>
+
+Three years of AEP hourly consumption; failure defined as a forecast error
+exceeding 0.4σ ≈ 1 GW. Top: the load with its daily cycles. Bottom: for every
+hour of the held-out test, **how many hours ahead each model can be trusted** —
+a learned forecaster (blue, median **6.3 h**) versus the industry
+same-hour-yesterday baseline (amber, median **3.2 h**), both with measured
+coverage above the 0.90 target (0.92 / 0.95). This is model comparison in the
+unit that operations actually use — *hours of guaranteed trust* — instead of
+an average RMSE. Note the amber spikes: the per-window map also shows *when*
+the naive rule is temporarily excellent (highly regular days), information a
+global metric erases. The per-window signal is verified, not decorative:
+Spearman(L, realized horizon) = 0.44, asserted by the generating script
+(`studies/make_energy_figure.py`) before the figure can be saved.
 
 ## The chaos floor: what R is calibrated against
 
