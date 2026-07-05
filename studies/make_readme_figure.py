@@ -38,6 +38,17 @@ def main():
     print(f"windows={n_windows}  L in [{L.min():.1f}, {L.max():.1f}] "
           f"med={np.median(L):.1f}  coverage={est.coverage_:.3f}")
 
+    # Information-content check (the figure must carry signal, not decoration;
+    # these numbers back the README caption):
+    from scipy.stats import spearmanr
+    H = est.test_horizons_
+    rho, _ = spearmanr(L, H)
+    q1, q4 = np.quantile(L, 0.25), np.quantile(L, 0.75)
+    print(f"Spearman(L, realized H) = {rho:.3f} | H median in bottom/top L "
+          f"quartile: {np.median(H[L <= q1]):.0f} / {np.median(H[L >= q4]):.0f} | "
+          f"constant-bound alternative: {np.quantile(H, 0.1):.0f} steps everywhere")
+    assert rho > 0.5, "figure would be decorative -- do not publish it"
+
     # Reconstruct the standardized test segment for the top panel (same split
     # convention as the estimator: train 0.6 / val 0.15 / calib 0.15 / test 0.1).
     n = series.size
