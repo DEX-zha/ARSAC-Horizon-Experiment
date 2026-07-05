@@ -71,3 +71,27 @@ def plot_log_divergence(rmse_by_h, lyap_step, out_path):
     plt.tight_layout()
     plt.savefig(out_path)
     plt.close()
+
+
+def plot_predictability_map(l_values, jac_values, resid_values, out_path):
+    """Saves a predictability heatmap for L(x_t) plus optional correlates."""
+    l_values = np.asarray(l_values, dtype=np.float64)
+    if l_values.size == 0:
+        return
+    fig, axes = plt.subplots(2, 1, figsize=(10, 4.5), gridspec_kw={"height_ratios": [1, 2]})
+    heat = l_values.reshape(1, -1)
+    axes[0].imshow(heat, aspect="auto", cmap="viridis")
+    axes[0].set_yticks([])
+    axes[0].set_xlabel("t")
+    axes[0].set_title("Predictability map: L(x_t)")
+
+    axes[1].plot(l_values, label="L(x_t)")
+    if jac_values is not None and len(jac_values) == l_values.size:
+        axes[1].plot(jac_values, alpha=0.7, label="jac_norm")
+    if resid_values is not None and len(resid_values) == l_values.size:
+        axes[1].plot(resid_values, alpha=0.7, label="resid1")
+    axes[1].set_xlabel("t")
+    axes[1].legend()
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()

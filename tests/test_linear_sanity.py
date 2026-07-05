@@ -1,14 +1,11 @@
 
-import sys
+import logging
 import os
-import numpy as np
+import sys
 
 sys.path.append(os.getcwd())
-from src.horizon_data import DataManager
-from src.horizon_forecast import Forecaster
+
 from src.horizon_experiment import run_experiment
-import logging
-import argparse
 
 # Mocking args for linear sanity test
 class MockArgs:
@@ -116,37 +113,12 @@ class MockArgs:
         self.plot_prefix = "sanity"
 
 def test_linear_sanity():
-    print("Testing Linear Model Sanity...")
-    # Setup
     args = MockArgs()
-    # Force a simpler dataset: Logistic Map is fine, but let's try a pure linear process if possible.
-    # Actually, Logistic Map r=4 is chaotic, linear prediction should FAIL to predict far.
-    # BUT, 1-step prediction might be decent with high dim/lag? No, it's non-linear.
-    # Wait, the prompt asked for "sanity check for linear series".
-    # Since I don't have a generator for a linear series, I will monkey-patch the DataManager or just assume Logistic Map
-    # and check that the pipeline runs without crash.
-    # OR better: I can override DataManager's load_series to return a constant or linear slope.
-    
-    # Let's verify pipeline execution primarily.
-    try:
-        logging.basicConfig(level=logging.INFO)
-        results = run_experiment(args)
-        print("Pipeline finished successfully.")
-        print(f"Results: {results}")
-        
-        # Check basic keys
-        assert "val_loss" in results
-        assert "horizon_real" in results
-        
-        return True
-    except Exception as e:
-        print(f"Pipeline crashed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+    logging.basicConfig(level=logging.INFO)
+    results = run_experiment(args)
+
+    assert "val_loss" in results
+    assert "horizon_real" in results
 
 if __name__ == "__main__":
-    if test_linear_sanity():
-        sys.exit(0)
-    else:
-        sys.exit(1)
+    test_linear_sanity()

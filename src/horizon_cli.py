@@ -7,6 +7,46 @@ import sys
 
 import yaml
 
+# Per-system integration timestep defaults (audit A1/A3: sharing one dt
+# across systems broke Mackey-Glass and mismatched Lorenz/Rossler scales).
+DEFAULT_DT = {"lorenz": 0.01, "rossler": 0.05, "mackey_glass": 1.0, "logistic": 1.0}
+
+# Reference largest Lyapunov exponents per unit time (literature values,
+# validated by tests/test_physics_chaos.py). Used to size horizon_max in
+# Lyapunov times (audit A3: a horizon window far below 1/lambda measures
+# model-error accumulation, not the predictability limit of the attractor).
+DEFAULT_LAMBDA = {
+    "lorenz": 0.906,
+    "rossler": 0.071,
+    "mackey_glass": 0.006,
+    "logistic": 0.693,
+}
+
+
+def resolve_dt(dataset, dt):
+    """Resolves the effective dt: per-system default when dt is None."""
+    return DEFAULT_DT.get(dataset, 1.0) if dt is None else (1.0 if dataset == "logistic" else float(dt))
+
+
+def resolve_horizon_max(dataset, dt, horizon_max, lyap_factor=3.0):
+    """Resolves horizon_max: ``lyap_factor`` Lyapunov times when left as None.
+
+    Explicit values are respected as-is. The auto value is clamped to
+    [30, 400] steps: below 30 the horizon labels are too quantized, above
+    400 the rolling multi-step cost dominates (the 400 cap under-spans
+    3 Lyapunov times for Rossler at dt=0.05 and Mackey-Glass at dt=1.0;
+    the caller logs when the target is cut).
+    """
+    if horizon_max is not None:
+        return int(horizon_max), None
+    lam = DEFAULT_LAMBDA.get(dataset)
+    if lam is None or lam <= 0.0 or dt is None or dt <= 0.0:
+        return 50, None
+    import math
+
+    target = int(math.ceil(float(lyap_factor) / (lam * float(dt))))
+    return int(min(max(target, 30), 400)), target
+
 
 def build_parser(add_help=True):
     """Builds the argument parser for the experiment CLI."""
@@ -54,7 +94,19 @@ def build_parser(add_help=True):
     parser.add_argument("--lstm-batch", type=int, default=64)
     parser.add_argument("--lstm-patience", type=int, default=12)
 
-    parser.add_argument("--horizon-max", type=int, default=50)
+    parser.add_argument(
+        "--horizon-max",
+        type=int,
+        default=None,
+        help="Max rollout horizon in steps; None = horizon-lyap-factor Lyapunov "
+        "times for the dataset (clamped to [30, 400] and to the data budget)",
+    )
+    parser.add_argument(
+        "--horizon-lyap-factor",
+        type=float,
+        default=3.0,
+        help="Auto horizon_max target in Lyapunov times (used when --horizon-max is None)",
+    )
     parser.add_argument(
         "--selection-metric",
         type=str,
@@ -77,6 +129,16 @@ def build_parser(add_help=True):
         default="probabilistic",
     )
     parser.add_argument("--horizon-quantile", type=float, default=None)
+    parser.add_argument(
+        "--censored-quantile",
+        dest="censored_quantile",
+        action="store_true",
+        default=False,
+        help="Handle Hmax-censored labels (audit C3): train quantile models "
+        "with the Powell censored pinball loss (cap=horizon_max) and cap "
+        "predictions at horizon_max in the conformal score/margin paths. "
+        "Enable when p_sat_calib > 0; exact no-op on uncensored data.",
+    )
     parser.add_argument(
         "--conformal-mode",
         type=str,
@@ -148,6 +210,11 @@ def build_parser(add_help=True):
     parser.add_argument("--quantile-ensemble-stride", type=int, default=1000)
     parser.add_argument("--block-count", type=int, default=5)
     parser.add_argument("--block-quantile", type=float, default=0.9)
+    parser.add_argument("--coverage-guard-quantile", type=float, default=None)
+    parser.add_argument("--coverage-guard-margin", type=float, default=0.02)
+    parser.add_argument("--coverage-guard-min-scale", type=float, default=0.0)
+    parser.add_argument("--debias-scale", type=float, default=0.0)
+    parser.add_argument("--debias-quantile", type=float, default=None)
     parser.add_argument(
         "--offset-calibration",
         dest="offset_calibration",
@@ -185,12 +252,17 @@ def build_parser(add_help=True):
     parser.add_argument("--expansion-horizon", type=int, default=10)
     parser.add_argument("--calibrate-coverage", action="store_true")
     parser.add_argument("--calibration-alpha", type=float, default=0.1)
-    parser.add_argument("--calibration-floor", type=float, default=1.0)
+    parser.add_argument(
+        "--calibration-floor",
+        type=float,
+        default=0.0,
+        help="Lower bound on calibration scale; 1.0 forced the broken inflation direction (audit D1)",
+    )
 
-    parser.add_argument("--lyap-max-t", type=int, default=25)
-    parser.add_argument("--lyap-theiler", type=int, default=10)
-    parser.add_argument("--lyap-fit-start", type=int, default=1)
-    parser.add_argument("--lyap-fit-end", type=int, default=10)
+    parser.add_argument("--lyap-max-t", type=int, default=None, help="None = auto")
+    parser.add_argument("--lyap-theiler", type=int, default=None, help="None = auto")
+    parser.add_argument("--lyap-fit-start", type=int, default=None, help="None = auto")
+    parser.add_argument("--lyap-fit-end", type=int, default=None, help="None = auto")
     parser.add_argument("--lyap-dim", type=int, default=None)
     parser.add_argument("--lyap-lag", type=int, default=None)
 
@@ -198,13 +270,20 @@ def build_parser(add_help=True):
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--plot-prefix", type=str, default="horizon")
+    parser.add_argument("--predictability-map", action="store_true", default=False)
     parser.add_argument("--progress", action="store_true", default=True)
     parser.add_argument("--no-progress", dest="progress", action="store_false")
 
     parser.add_argument("--r", type=float, default=4.0)
     parser.add_argument("--x0", type=float, default=0.2)
 
-    parser.add_argument("--dt", type=float, default=0.01)
+    parser.add_argument(
+        "--dt",
+        type=float,
+        default=None,
+        help="Integration timestep; None picks the per-system default from DEFAULT_DT "
+        "(sharing one dt across systems was audit bug A1/A3)",
+    )
     parser.add_argument(
         "--integrator",
         type=str,
@@ -219,11 +298,14 @@ def build_parser(add_help=True):
     parser.add_argument("--b", type=float, default=0.2)
     parser.add_argument("--c", type=float, default=5.7)
 
-    parser.add_argument("--tau", type=int, default=17)
+    parser.add_argument(
+        "--tau", type=float, default=17.0, help="Mackey-Glass delay in TIME units"
+    )
     parser.add_argument("--mg-beta", type=float, default=0.2)
     parser.add_argument("--gamma", type=float, default=0.1)
     parser.add_argument("--n", type=int, default=10)
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config file")
+    parser.add_argument("--return-embed-search", action="store_true", default=False)
     return parser
 
 

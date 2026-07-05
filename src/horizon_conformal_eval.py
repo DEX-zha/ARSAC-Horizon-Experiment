@@ -26,6 +26,14 @@ def summarize_records(records, fields):
     return summary
 
 
+def min_value(values):
+    """Returns the minimum of non-None values."""
+    values = [v for v in values if v is not None]
+    if not values:
+        return None
+    return float(min(values))
+
+
 def main():
     """Runs multi-seed evaluation for conformal horizon bounds."""
     pre_parser = argparse.ArgumentParser(add_help=False)
@@ -111,6 +119,13 @@ def main():
                     "jac_q4": jac_stats.get("jac_q4"),
                     "calibration_coverage": result.get("calibration_coverage"),
                     "calibration_alpha": args.calibration_alpha,
+                    "p_sat_calib": result.get("p_sat_calib"),
+                    "p_sat_test": result.get("p_sat_test"),
+                    "coverage_guard": result.get("coverage_guard"),
+                    "debias_delta": result.get("debias_delta"),
+                    "debias_quantile": result.get("debias_quantile"),
+                    "predictability_corr_jac": result.get("predictability_corr_jac"),
+                    "predictability_corr_resid": result.get("predictability_corr_resid"),
                     "conformal_mode": args.conformal_mode,
                     "horizon_consecutive_k": args.horizon_consecutive_k,
                     "horizon_calib_thin": args.horizon_calib_thin,
@@ -158,6 +173,13 @@ def main():
                         format_value(record.get("jac_q4")),
                     format_value(record.get("calibration_coverage")),
                     format_value(record.get("calibration_alpha")),
+                    format_value(record.get("p_sat_calib")),
+                    format_value(record.get("p_sat_test")),
+                    format_value(record.get("coverage_guard")),
+                    format_value(record.get("debias_delta")),
+                    format_value(record.get("debias_quantile")),
+                    format_value(record.get("predictability_corr_jac")),
+                    format_value(record.get("predictability_corr_resid")),
                     record.get("conformal_mode", ""),
                     record.get("horizon_consecutive_k", ""),
                     record.get("horizon_calib_thin", ""),
@@ -201,8 +223,12 @@ def main():
                 "jac_q2",
                 "jac_q3",
                 "jac_q4",
+                "p_sat_calib",
+                "p_sat_test",
+                "coverage_guard",
             ]
             summary = summarize_records(records, summary_fields)
+            summary["coverage_test_min"] = min_value([r.get("coverage_test") for r in records])
             summary["dataset"] = dataset
             summary["model"] = model
             summary["seed_count"] = len(records)
@@ -229,6 +255,13 @@ def main():
         "jac_q4",
         "calibration_coverage",
         "calibration_alpha",
+        "p_sat_calib",
+        "p_sat_test",
+        "coverage_guard",
+        "debias_delta",
+        "debias_quantile",
+        "predictability_corr_jac",
+        "predictability_corr_resid",
         "conformal_mode",
         "horizon_consecutive_k",
         "horizon_calib_thin",
@@ -260,6 +293,7 @@ def main():
         "dataset",
         "model",
         "seed_count",
+        "coverage_test_min",
         "coverage_test_med",
         "tightness_ratio_med",
         "slack_median_med",
@@ -272,6 +306,8 @@ def main():
         "jac_q2_med",
         "jac_q3_med",
         "jac_q4_med",
+        "p_sat_calib_med",
+        "p_sat_test_med",
         "calibration_alpha",
         "conformal_mode",
     ]
@@ -285,6 +321,7 @@ def main():
                 row.get("dataset", ""),
                 row.get("model", ""),
                 row.get("seed_count", ""),
+                format_value(row.get("coverage_test_min")),
                 format_value(row.get("coverage_test")),
                 format_value(row.get("tightness_ratio")),
                 format_value(row.get("slack_median")),
@@ -297,6 +334,8 @@ def main():
                 format_value(row.get("jac_q2")),
                 format_value(row.get("jac_q3")),
                 format_value(row.get("jac_q4")),
+                format_value(row.get("p_sat_calib")),
+                format_value(row.get("p_sat_test")),
                 format_value(row.get("calibration_alpha")),
                 row.get("conformal_mode", ""),
             ]

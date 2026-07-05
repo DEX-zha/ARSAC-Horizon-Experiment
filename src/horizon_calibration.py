@@ -121,41 +121,10 @@ def fit_mondrian_bins(features, scores, alpha, edges_list, min_bin, shrinkage, g
         c_groups[gid] = c_group
     return c_groups, group_ids, counts
 
-class ConformalTreeEstimator:
-    """Wraps Scikit-Learn DecisionTree for quantile prediction."""
-    def __init__(self, min_samples_leaf, max_depth, min_gain=0.0):
-        from sklearn.tree import DecisionTreeRegressor
-        self.tree = DecisionTreeRegressor(
-            min_samples_leaf=min_samples_leaf,
-            max_depth=max_depth,
-            min_impurity_decrease=min_gain
-        )
-        self.leaf_quantiles = {}
-        self.global_fallback = 0.0
-
-    def fit(self, X, y, alpha, rng=None, tie_jitter=0.0):
-        # We fit logic to minimize variance (standard CART), then compute quantiles in leaves
-        self.tree.fit(X, y)
-        leaf_ids = self.tree.apply(X)
-        unique_leaves = np.unique(leaf_ids)
-        
-        # Global fallback if needed
-        self.global_fallback = conformal_quantile(y, alpha, rng=rng, tie_jitter=tie_jitter)
-
-        for leaf in unique_leaves:
-            mask = leaf_ids == leaf
-            leaf_y = y[mask]
-            self.leaf_quantiles[leaf] = conformal_quantile(
-                leaf_y, alpha, rng=rng, tie_jitter=tie_jitter
-            )
-
-    def predict(self, X):
-        leaf_ids = self.tree.apply(X)
-        # Vectorized map approach
-        return np.array([self.leaf_quantiles.get(l, self.global_fallback) for l in leaf_ids])
-
-    def apply(self, X):
-        return self.tree.apply(X)
+# Single source of truth for the tree estimator: the audited implementation in
+# src.horizon_conformal (temporal split fit, audit E3). This legacy module used
+# to carry a stale duplicate with the pre-audit single-set fit.
+from src.horizon_conformal import ConformalTreeEstimator  # noqa: F401, E402
 
 def extract_bin_features(x_raw, dim, mode):
     """Extracts regime features for forced Mondrian bins."""

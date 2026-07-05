@@ -1,0 +1,389 @@
+"""Conformal calibration helpers for horizon_experiment."""
+
+from __future__ import annotations
+
+import logging
+
+import numpy as np
+
+from src.horizon_censoring import saturation_gate
+from src.horizon_conformal import (
+    ConformalTreeEstimator,
+    assign_bin_ids,
+    block_conformal_margin,
+    compute_bin_edges,
+    extract_bin_features,
+    fit_mondrian_bins,
+)
+from src.horizon_experiment_core import (
+    ConformalModel,
+    _clip_horizon,
+    _const,
+    _seed_offset,
+)
+
+
+def _censored_pred(pred, args):
+    """Caps predictions at horizon_max when --censored-quantile is on.
+
+    Measured requirement (study P2): with the Powell loss the raw signed
+    score pred - y inflates the conformal margin (mean L 8.940 vs 9.290);
+    capping the prediction restores a near-nominal margin. Both labels and
+    capped predictions live in [0, Hmax], so the score stays informative.
+    """
+    if getattr(args, "censored_quantile", False) and pred.size:
+        return np.minimum(pred, float(args.horizon_max))
+    return pred
+
+
+def _compute_scores(pred_calib, y_calib, sigma_calib, use_sigma, args):
+    signed = _censored_pred(pred_calib, args) - y_calib
+    if use_sigma:
+        scores = signed / np.maximum(sigma_calib, args.scale_floor)
+    else:
+        scores = signed
+    return scores, signed
+
+
+
+def _score_quantiles(constants):
+    q = _const(constants, "score_quantiles")
+    return float(q[0]), float(q[1]), float(q[2])
+
+
+
+def _score_distribution_stats(scores, constants):
+    if not scores.size:
+        return {}
+    q10, q50, q90 = _score_quantiles(constants)
+    return {
+        "score_pos_frac": float(np.mean(scores > 0.0)),
+        "score_neg_frac": float(np.mean(scores < 0.0)),
+        "score_zero_frac": float(np.mean(scores == 0.0)),
+        "score_p10": float(np.quantile(scores, q10)),
+        "score_p50": float(np.median(scores)),
+        "score_p90": float(np.quantile(scores, q90)),
+        "score_mean": float(np.mean(scores)),
+    }
+
+
+
+def _score_signal_stats(signed, pred_calib, y_calib, sigma_calib, use_sigma, constants):
+    stats = {}
+    if signed.size:
+        stats["signed_med"] = float(np.median(signed))
+    if pred_calib.size:
+        stats["pred_calib_med"] = float(np.median(pred_calib))
+    if y_calib.size:
+        stats["y_calib_med"] = float(np.median(y_calib))
+    if use_sigma and sigma_calib.size:
+        _, _, q90 = _score_quantiles(constants)
+        stats["sigma_med"] = float(np.median(sigma_calib))
+        stats["sigma_p90"] = float(np.quantile(sigma_calib, q90))
+        stats["sigma_max"] = float(np.max(sigma_calib))
+    return stats
+
+
+
+def _global_margin(scores, args, rng):
+    return block_conformal_margin(
+        scores,
+        args.calibration_alpha,
+        args.block_count,
+        block_quantile=args.block_quantile,
+        rng=rng,
+        tie_jitter=args.conformal_tie_jitter,
+    )
+
+
+
+def _feature_indices(best_dim):
+    return {
+        "jac": best_dim + 2,
+        "jac_log": best_dim + 5,
+        "resid": best_dim + 3,
+        "err_var": best_dim + 6,
+        "pred_var": best_dim + 7,
+    }
+
+
+
+def _safe_feature_column(x_raw, idx, ref):
+    return x_raw[:, idx] if x_raw.size else np.zeros_like(ref)
+
+
+
+def _tree_features(x_raw, pred, sigma, indices):
+    return np.column_stack(
+        [
+            pred,
+            sigma,
+            _safe_feature_column(x_raw, indices["jac"], pred),
+            _safe_feature_column(x_raw, indices["jac_log"], pred),
+            _safe_feature_column(x_raw, indices["resid"], pred),
+            _safe_feature_column(x_raw, indices["err_var"], pred),
+            _safe_feature_column(x_raw, indices["pred_var"], pred),
+        ]
+    )
+
+
+
+def _min_leaf_eff(args, scores_size, constants):
+    floor = int(_const(constants, "tree_min_leaf_floor"))
+    if scores_size:
+        return min(args.conformal_min_leaf, max(floor, int(scores_size // 4)))
+    return args.conformal_min_leaf
+
+
+
+def _tree_estimator(args, scores_size, constants):
+    return ConformalTreeEstimator(
+        min_samples_leaf=_min_leaf_eff(args, scores_size, constants),
+        max_depth=args.conformal_tree_depth,
+        min_gain=args.conformal_tree_min_gain,
+    )
+
+
+
+def _fit_tree_conformal(pred_calib, sigma_calib, scores, x_calib_raw, args, best, constants, rng):
+    indices = _feature_indices(best["dim"])
+    features = _tree_features(x_calib_raw, pred_calib, sigma_calib, indices)
+    tree = _tree_estimator(args, scores.size, constants)
+    tree.fit(features, scores, args.calibration_alpha, rng=rng, tie_jitter=args.conformal_tie_jitter)
+    return tree, tree.predict(features)
+
+
+
+def _predict_tree_c(tree, pred_test, sigma_test, x_test_raw, best):
+    indices = _feature_indices(best["dim"])
+    features = _tree_features(x_test_raw, pred_test, sigma_test, indices)
+    return tree.predict(features), tree.apply(features)
+
+
+
+def _bin_features(args, x_raw, best):
+    return extract_bin_features(x_raw, best["dim"], args.conformal_bin_feature)
+
+
+
+def _bin_pool(bin_features_train, bin_features_calib):
+    if bin_features_train.size and bin_features_calib.size:
+        return np.vstack([bin_features_train, bin_features_calib])
+    return bin_features_calib if bin_features_calib.size else bin_features_train
+
+
+
+def _bin_edges_list(bin_pool, bins):
+    bin_dim = bin_pool.shape[1] if bin_pool.ndim == 2 else 1
+    return [compute_bin_edges(bin_pool[:, col], bins) for col in range(bin_dim)]
+
+
+
+def _bin_stats(bin_counts, c_groups):
+    if not bin_counts.size:
+        return {}
+    nonzero = bin_counts[bin_counts > 0]
+    if not nonzero.size:
+        return {}
+    stats = {"bin_count": int(nonzero.size), "bin_min_count": int(np.min(nonzero)), "bin_med_count": float(np.median(nonzero))}
+    c_used = c_groups[bin_counts > 0]
+    if c_used.size:
+        stats.update({"bin_c_min": float(np.min(c_used)), "bin_c_med": float(np.median(c_used)), "bin_c_max": float(np.max(c_used))})
+    return stats
+
+
+
+def _fit_bin_conformal(pred_calib, scores, x_train_raw, x_calib_raw, args, best, constants, rng, c_global):
+    bin_train = _bin_features(args, x_train_raw, best)
+    bin_calib = _bin_features(args, x_calib_raw, best)
+    bin_pool = _bin_pool(bin_train, bin_calib)
+    edges_list = _bin_edges_list(bin_pool, args.conformal_bins)
+    c_groups, bin_ids, bin_counts = fit_mondrian_bins(
+        bin_calib, scores, args.calibration_alpha, edges_list, args.conformal_min_bin,
+        args.conformal_bin_shrinkage, c_global, rng=rng, tie_jitter=args.conformal_tie_jitter,
+    )
+    bin_model = {"edges": edges_list, "c_groups": c_groups, "counts": bin_counts}
+    c_calib = c_groups[bin_ids] if bin_ids.size else np.full_like(pred_calib, c_global)
+    return bin_model, c_calib, _bin_stats(bin_counts, c_groups)
+
+
+
+def _predict_bin_c(bin_model, pred_test, x_test_raw, args, best, c_global):
+    bin_features_test = _bin_features(args, x_test_raw, best)
+    bin_ids, _ = assign_bin_ids(bin_features_test, bin_model["edges"])
+    c_test = bin_model["c_groups"][bin_ids] if bin_ids.size else np.full_like(pred_test, c_global)
+    return c_test, bin_ids
+
+
+
+def _calib_interval(pred_calib, c_calib, sigma_calib, use_sigma, args, constants):
+    sigma_term = sigma_calib if use_sigma else np.ones_like(c_calib)
+    return _clip_horizon(_censored_pred(pred_calib, args) - c_calib * sigma_term, args, constants)
+
+
+
+def _calib_stats(l_calib, y_calib):
+    if not l_calib.size:
+        return None, None, 0
+    coverage = float(np.mean(y_calib >= l_calib)) if y_calib.size else None
+    return float(np.median(l_calib)), coverage, int(len(y_calib))
+
+
+def _coverage_guard(l_calib, y_calib, args):
+    if not l_calib.size or not y_calib.size:
+        return 0.0
+    z = l_calib - y_calib
+    alpha = float(args.calibration_alpha)
+    guard_quantile = args.coverage_guard_quantile
+    if guard_quantile is None:
+        guard_quantile = 1.0 - alpha
+    guard_quantile = float(min(max(guard_quantile, 0.0), 1.0))
+    block_count = max(1, int(args.block_count))
+    if block_count <= 1 or z.size <= 1:
+        return float(np.quantile(z, 1.0 - alpha))
+    block_count = min(block_count, z.size)
+    block_size = max(1, z.size // block_count)
+    guards = []
+    for i in range(block_count):
+        start = i * block_size
+        end = z.size if i == block_count - 1 else start + block_size
+        block = z[start:end]
+        if block.size:
+            guards.append(float(np.quantile(block, 1.0 - alpha)))
+    if not guards:
+        return float(np.quantile(z, 1.0 - alpha))
+    return float(np.quantile(np.asarray(guards, dtype=np.float64), guard_quantile))
+
+
+def _bin_guard_groups(z, bin_ids, group_count, args, global_guard):
+    if group_count <= 0:
+        return np.array([], dtype=np.float64)
+    guards = np.full(group_count, global_guard, dtype=np.float64)
+    counts = np.bincount(bin_ids, minlength=group_count)
+    alpha = float(args.calibration_alpha)
+    guard_quantile = args.coverage_guard_quantile
+    if guard_quantile is None:
+        guard_quantile = 1.0 - alpha
+    guard_quantile = float(min(max(guard_quantile, 0.0), 1.0))
+    for gid in range(group_count):
+        count = int(counts[gid])
+        if count < args.conformal_min_bin:
+            continue
+        z_g = z[bin_ids == gid]
+        if z_g.size == 0:
+            continue
+        guard = float(
+            block_conformal_margin(
+                z_g,
+                args.calibration_alpha,
+                args.block_count,
+                block_quantile=guard_quantile,
+                rng=None,
+                tie_jitter=args.conformal_tie_jitter,
+            )
+        )
+        if args.conformal_bin_shrinkage > 0:
+            weight = count / (count + float(args.conformal_bin_shrinkage))
+            guard = weight * guard + (1.0 - weight) * global_guard
+        guards[gid] = guard
+    return guards
+
+
+
+def _fit_conformal_model(ctx, sets, preds, scores, use_sigma, constants, rng, stats):
+    if ctx.args.conformal_mode == "tree":
+        tree, c_calib = _fit_tree_conformal(preds.pred_calib, preds.sigma_calib, scores, sets.x_calib_raw, ctx.args, ctx.best, constants, rng)
+        return ConformalModel("tree", stats["c_global"], tree=tree), c_calib
+    if ctx.args.conformal_mode == "bins":
+        bin_model, c_calib, bin_stats = _fit_bin_conformal(preds.pred_calib, scores, sets.x_train_raw, sets.x_calib_raw, ctx.args, ctx.best, constants, rng, stats["c_global"])
+        stats.update(bin_stats)
+        return ConformalModel("bins", stats["c_global"], bin_model=bin_model), c_calib
+    c_calib = np.full_like(preds.pred_calib, stats["c_global"])
+    return ConformalModel("global", stats["c_global"]), c_calib
+
+
+
+def _conformal_c_test(model, preds, sets, constants, ctx):
+    if model.mode == "tree" and model.tree is not None:
+        c_test, leaf_ids = _predict_tree_c(model.tree, preds.pred_test, preds.sigma_test, sets.x_test_raw, ctx.best)
+        return c_test, leaf_ids, None
+    if model.mode == "bins" and model.bin_model is not None:
+        c_test, bin_ids = _predict_bin_c(model.bin_model, preds.pred_test, sets.x_test_raw, ctx.args, ctx.best, model.c_global)
+        guard = None
+        if "guard_groups" in model.bin_model and bin_ids is not None and bin_ids.size:
+            guard = model.bin_model["guard_groups"][bin_ids]
+        return c_test, bin_ids, guard
+    return np.full_like(preds.pred_test, model.c_global), None, None
+
+
+
+def _calibrate_conformal(ctx, sets, preds, use_sigma, constants, stats):
+    # Always-on identification check (audit C3): H_w == Hmax means
+    # H_true >= Hmax, and the target quantile is identified from censored
+    # labels only when p_sat <= 1 - alpha.
+    gate = saturation_gate(sets.y_calib, ctx.args.horizon_max, ctx.args.calibration_alpha)
+    stats["label_identified"] = gate["identified"]
+    if not gate["identified"]:
+        logging.warning("Saturation gate (calibration labels): %s", gate["message"])
+    scores, signed = _compute_scores(preds.pred_calib, sets.y_calib, preds.sigma_calib, use_sigma, ctx.args)
+    stats.update(_score_distribution_stats(scores, constants))
+    stats.update(_score_signal_stats(signed, preds.pred_calib, sets.y_calib, preds.sigma_calib, use_sigma, constants))
+    rng = np.random.default_rng(_seed_offset(ctx.args.seed, constants, "tie_rng"))
+    stats["c_global"] = _global_margin(scores, ctx.args, rng)
+    model, c_calib = _fit_conformal_model(ctx, sets, preds, scores, use_sigma, constants, rng, stats)
+    l_calib = _calib_interval(preds.pred_calib, c_calib, preds.sigma_calib, use_sigma, ctx.args, constants)
+    coverage_pre = None
+    if l_calib.size and sets.y_calib.size:
+        coverage_pre = float(np.mean(sets.y_calib >= l_calib))
+    target = 1.0 - float(ctx.args.calibration_alpha)
+    guard = 0.0
+    guard_scale = 0.0
+    guard_raw = 0.0
+    if l_calib.size and sets.y_calib.size:
+        guard_raw = _coverage_guard(l_calib, sets.y_calib, ctx.args)
+    min_scale = float(getattr(ctx.args, "coverage_guard_min_scale", 0.0))
+    if coverage_pre is None:
+        guard_scale = max(min_scale, 1.0)
+    else:
+        margin = float(getattr(ctx.args, "coverage_guard_margin", 0.02))
+        if margin <= 0.0:
+            base_scale = 1.0
+        else:
+            gap = max(0.0, target - coverage_pre)
+            base_scale = min(1.0, gap / margin)
+        guard_scale = max(min_scale, base_scale)
+    guard = guard_raw * guard_scale
+    apply_guard = guard != 0.0
+    stats["coverage_guard"] = guard
+    if apply_guard and ctx.args.conformal_mode == "bins" and model.bin_model is not None:
+        bin_features = _bin_features(ctx.args, sets.x_calib_raw, ctx.best)
+        bin_ids, group_count = assign_bin_ids(bin_features, model.bin_model["edges"])
+        if bin_ids.size:
+            z = l_calib - sets.y_calib
+            guard_groups = _bin_guard_groups(z, bin_ids, group_count, ctx.args, guard_raw)
+            guard_groups = guard_groups * guard_scale
+            model.bin_model["guard_groups"] = guard_groups
+            l_calib = _clip_horizon(l_calib - guard_groups[bin_ids], ctx.args, constants)
+        elif guard != 0.0:
+            l_calib = _clip_horizon(l_calib - guard, ctx.args, constants)
+    elif apply_guard:
+        l_calib = _clip_horizon(l_calib - guard, ctx.args, constants)
+    debias_delta = 0.0
+    debias_q = ctx.args.debias_quantile
+    if debias_q is None:
+        debias_q = target
+    debias_q = float(min(max(debias_q, 0.0), 1.0))
+    if ctx.args.debias_scale > 0.0 and l_calib.size and sets.y_calib.size:
+        z = l_calib - sets.y_calib
+        debias_delta = float(np.quantile(z, debias_q)) * float(ctx.args.debias_scale)
+        if np.isfinite(debias_delta) and debias_delta != 0.0:
+            l_calib = _clip_horizon(l_calib - debias_delta, ctx.args, constants)
+    stats["debias_delta"] = debias_delta
+    stats["debias_quantile"] = debias_q
+    l_med, coverage, samples = _calib_stats(l_calib, sets.y_calib)
+    stats["l_calib_med"] = l_med
+    stats["coverage"] = coverage
+    stats["calibration_samples"] = samples
+    return model
+
+

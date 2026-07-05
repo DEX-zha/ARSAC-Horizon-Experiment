@@ -1,0 +1,10 @@
+.*
+__pycache__
+log
+HORIZON_TIGHTNESS_HELP.md
+outputs/
+outputs_*/
+wandb/
+arsac_horizon.egg-info/
+tests/output_sanity/horizon_results_v*.csv
+data_sunspots.csv

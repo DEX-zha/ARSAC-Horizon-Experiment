@@ -27,6 +27,7 @@ class Forecaster:
         self.device = device
         self.best_config = None
         self.model = None
+        self.search_history = []
 
     def select_embedding(self, train_series, val_series):
         """Selects the best (dim, lag) embedding based on validation criteria."""
@@ -143,6 +144,17 @@ class Forecaster:
                     selection["score"] = horizon_val
                     selection["horizon"] = horizon_val
 
+                self.search_history.append(
+                    {
+                        "dim": dim,
+                        "lag": lag,
+                        "val_loss": float(val_loss),
+                        "selection_metric": self.args.selection_metric,
+                        "selection_score": float(selection["score"]),
+                        "selection_horizon": selection["horizon"],
+                    }
+                )
+
                 if best is None:
                     best = {
                         "dim": dim,
@@ -183,6 +195,7 @@ class Forecaster:
             progress.close()
             
         self.best_config = best
+        best["search_history"] = list(self.search_history)
         return best
 
     def train_final_model(self, train_series, val_series):

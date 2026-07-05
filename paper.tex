@@ -1,0 +1,105 @@
+\documentclass[11pt]{article}
+
+% arXiv-friendly packages
+\usepackage{arxiv}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{natbib}
+\usepackage{siunitx}
+
+\title{Conservative Prediction Horizons for Chaotic Time Series via Conformal Calibration}
+
+\author{
+  Your Name \\
+  Your Affiliation \\
+  \texttt{email@example.com} \\
+  \\
+  \And
+  Coauthor Name \\
+  Affiliation \\
+  \texttt{email@example.com}
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study conservative prediction horizons for chaotic time series. Given a forecasting model and a per-window horizon label, we learn a conditional lower bound and then calibrate it using conformal methods to target a desired coverage level. We report coverage, tightness, slack, and saturation statistics across multiple chaotic systems. Results (regenerated after a full mathematical audit of the pipeline) show empirical coverage at or near target on the logistic map, Mackey--Glass, and Lorenz, with tightness between 0.46 and 1.0. We report a negative result on R\"ossler with an MLP forecaster: coverage is unstable across seeds because the test split spans too few Lyapunov times, which yields a concrete data-budget requirement for slow chaotic systems. We provide a fully reproducible protocol (script-generated tables) and analyze failure modes via seed-level variability.
+\end{abstract}
+
+\keywords{conformal prediction; chaotic time series; prediction horizon; uncertainty quantification}
+
+\section{Introduction}
+Reliable prediction horizons are critical for decision-making under uncertainty in nonlinear and chaotic systems. Instead of producing a point forecast horizon, we aim to estimate a conservative lower bound that meets a target coverage level. We focus on a model-agnostic pipeline that labels per-window horizons, fits a quantile model, and calibrates with conformal prediction to achieve empirical coverage on a calibration set.
+
+Our contributions are:
+\begin{itemize}
+  \item A complete pipeline for conservative horizon estimation with conformal calibration.
+  \item Diagnostics that quantify coverage, tightness, slack, and saturation.
+  \item A reproducible evaluation on multiple chaotic benchmarks.
+\end{itemize}
+
+\section{Related Work}
+We build on prior work in chaotic time series forecasting, conformal prediction, and uncertainty calibration. Conformal methods provide distribution-free coverage under exchangeability assumptions, while chaos benchmarks such as Lorenz, Rossler, and Mackey--Glass are standard for nonlinear dynamics evaluation.
+
+\section{Problem Setup}
+Given a series $y_t$ and a forecasting model, we define a per-window horizon label $H_w$ as the first horizon where multi-step error exceeds a tolerance (absolute or relative). The goal is a lower bound $L(x)$ such that $\mathbb{P}(H_w \ge L(x)) \approx 1-\alpha$ empirically on a calibrated domain; overlapping windows violate exchangeability, so this is an empirical target under documented assumptions rather than a finite-sample guarantee.
+
+\section{Method}
+The pipeline consists of: (1) data generation, (2) embedding search (dim, lag), (3) forecaster training, (4) horizon labeling, (5) quantile modeling, and (6) conformal calibration with optional binning, shrinkage, and coverage guards.
+
+\subsection{Horizon Label}
+We roll the forecaster out autoregressively and define $H_w$ as the first horizon at which $K$ consecutive per-step absolute errors exceed a tolerance $\tau$ (else $H_{\mathrm{max}}$, right-censored). We use an attractor-scale tolerance $\tau = 0.4\,\sigma$ of the standardized series (the ``valid time'' convention); a relative mode (median one-step residual across windows times a factor) is available for diagnostics.
+
+\subsection{Conformal Lower Bound}
+Let $\hat{q}_\alpha(x)$ be the predicted $\alpha$-quantile of $H_w$. We use signed nonconformity scores to compute a conformal margin $c$ and return
+\begin{equation}
+L(x) = \hat{q}_\alpha(x) - c \cdot \sigma(x).
+\end{equation}
+
+\subsection{Stability and Guarding}
+We use Mondrian bins with shrinkage and optional block-quantile margins for robustness to non-IID effects. A coverage guard protects worst-seed coverage (ablation: $+1.2$ points); a historical debiasing step was removed after an ablation showed it cost coverage without a tightness gain on corrected labels.
+
+\section{Experimental Setup}
+We evaluate on Lorenz, Rossler, Mackey--Glass, and Logistic systems with fixed train/val/calib/test splits. For each dataset and model (linear, MLP), we run 5 seeds; the horizon window is sized automatically in Lyapunov times. Metrics include coverage, tightness, slack (median and $p90$), saturation rate, and predictability correlations.
+
+\section{Results}
+Table~\ref{tab:summary} reports median and minimum coverage, tightness, slack, and saturation across 5 seeds per system/model. All numbers were regenerated (2026-07-05) after the full mathematical audit of the pipeline (corrected Mackey--Glass DDE generator with the delay in time units, validated Lyapunov estimators, attractor-scale tolerance $\tau = 0.4\,\sigma$, horizon window sized in Lyapunov times, post-ablation calibration defaults) by \texttt{studies/benchmark\_final.py}; the table is emitted by \texttt{studies/make\_results\_tables.py} with no hand-copied values.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{l l r r r r r r r}
+    \toprule
+    System & Model & Seeds & CovMed & CovMin & TightMed & SlackP90 & pSatMed & $H_w$ med \\
+    \midrule
+logistic & linear & 5 & 0.967 & 0.960 & 1.000 & 1.9 & 0.000 & 1 \\
+logistic & mlp & 5 & 0.970 & 0.955 & 0.832 & 4.5 & 0.000 & 8 \\
+lorenz & linear & 5 & 0.943 & 0.936 & 0.757 & 30.0 & 0.000 & 23 \\
+lorenz & mlp & 5 & 0.963 & 0.930 & 0.617 & 80.5 & 0.000 & 58 \\
+mackey\_glass & linear & 5 & 0.960 & 0.954 & 0.768 & 12.4 & 0.000 & 11 \\
+mackey\_glass & mlp & 5 & 0.987 & 0.956 & 0.464 & 174.2 & 0.038 & 200 \\
+rossler & linear & 5 & 0.930 & 0.923 & 0.786 & 35.9 & 0.000 & 34 \\
+rossler & mlp & 5 & 0.813 & 0.700 & 0.698 & 51.0 & 0.000 & 44 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Regenerated summary metrics (medians across 5 seeds; $\alpha=0.05$). Cov=empirical coverage of the calibrated lower bound. Tight=median $L$ / median $H_w$. SlackP90=90th percentile of $H_w - L$ in steps. pSatMed=median saturation rate. $H_w$~med=median horizon label in steps.}
+  \label{tab:summary}
+\end{table}
+
+\section{Discussion}
+Empirical coverage is at or near the $1-\alpha$ target on the logistic map, Mackey--Glass, and Lorenz. Lorenz with the linear forecaster shows a small ($\approx 1$ point) systematic calibration-to-test shift; an ablation-validated remedy is to calibrate at $\alpha_{\mathrm{cal}} \approx \alpha - 0.015$ (measured delivery 0.951, min 0.947). The R\"ossler+MLP row is reported as a \emph{negative result}: coverage collapses on some seeds (min 0.700) because, at $\lambda_1 \approx 0.071$ and $dt = 0.05$, the test split spans only $\approx 4$ Lyapunov times --- too few independent regimes for stable coverage estimation. This is the irreducible test-side fluctuation analyzed in our dependence study, and it defines a concrete data-budget requirement for horizon studies on slow chaotic systems. Stronger forecasters see further (median $H_w$ of 58 vs.\ 23 steps on Lorenz, 200 vs.\ 11 on Mackey--Glass) but the calibrated bound is then more conservative (tightness 0.46--0.62), making bound tightness for strong models the main open optimization.
+
+\section{Limitations}
+The evaluation is based on synthetic chaotic systems (5 seeds per system/model). Coverage is empirical and applies only within the calibrated distribution; overlapping calibration windows break exchangeability, so no finite-sample conformal guarantee is claimed. Real-world applicability requires domain datasets and drift-aware recalibration.
+
+\section{Conclusion}
+We present a conformal framework for conservative prediction horizons in chaotic time series. Empirical coverage is strong on several benchmarks, but lower-bound metrics reveal variability across seeds and regimes. Future work will evaluate on real datasets and improve tail robustness.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
