@@ -78,6 +78,21 @@ appliqué de façon cohérente au score et à la borne. Toujours actif : la gard
 d'identification `label_identified` (p_sat ≤ 1−α requis, sinon warning — le
 quantile cible est dans la région censurée, cas Mackey-Glass historique).
 
+## 3bis. Le plancher physique : atteint et prouvé (2026-07-05)
+
+Résultat central de la campagne « chaos floor » (`docs/theory/chaos_floor.md`,
+`studies/study_chaos_floor.py`) : un NG-RC polynomial degré 6 sur l'état complet
+de Lorenz **atteint le plancher physique de prédictibilité** — ρ = H_modèle/H_jumeau
+= 0.834 et 0.862 sur deux seeds (critère pré-enregistré ≥ 0.8), R = Λ_eff/λ₁ =
+1.15–1.21 contre 0.96–1.03 pour le plancher lui-même, ~18–19 temps de Lyapunov
+de prévision valide. Preuve par jumeaux appariés (vraie dynamique perturbée à
+erreur initiale égale), pas par hypothèse. Sous-produits : la **loi du plancher
+d'injection** H_inj ≈ ln(τλ₁dt/e₀)/(λ₁dt), dérivée puis vérifiée à 12–21 % ; la
+**courbe de transition** model-limited → chaos-limited (R : 41 → 8.8 → 7.2 →
+2.25 → 1.45 → 1.15) ; et la validation du diagnostic R par contrôles positifs.
+Limites : Lorenz seul, données propres, état complet requis (observable-only
+plafonne à R≈7). Généralisation en cours (§6).
+
 ## 3. Le lien chaos ↔ horizon (FTLE) — établi, non exploité (P3 rangé)
 
 Ce que l'étude a **établi** (`docs/theory/ftle_horizons.md`) : les exposants de
