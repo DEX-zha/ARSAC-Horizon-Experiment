@@ -25,36 +25,78 @@ questions every practitioner actually has:
 | 📈 *Is it worth improving my model?* | **R = Λ_eff/λ₁**, your measured distance to the physical predictability floor | Validated against ground-truth paired twins ([the chaos-floor study](docs/theory/chaos_floor.md)) |
 | 🔊 *…or is it just noise?* | **margin_real**: the reachable margin once estimated observation noise is deducted | Noise-transported floor law, verified on known synthetic noise |
 
-No other packaged tool answers the second and third questions with a **calibrated instrument**.
+In plain words: for each window of your series the pipeline *measures* how long the
+forecast stays inside a tolerance band (the horizon **H**), then turns those
+measurements into a per-window lower bound **L(x)** that is wrong at most a chosen
+fraction α of the time. **R** and **margin_real** then tell you *why* the horizon
+stops where it does — model error, chaos itself, or measurement noise.
+
+To our knowledge, no other packaged tool answers the second and third questions
+with a **calibrated instrument**.
+
+<div align="center">
+<img src="assets/predictability_map.png" alt="Predictability map: calibrated lower bound L(x_t) along one trajectory" width="760"/>
+<br/>
+<sub>One pipeline output: the calibrated bound <b>L(x_t)</b> along a single trajectory.
+Same system, same model — between 2 and 8 trustworthy steps depending on where you sit
+on the attractor. Predictability is a property of the moment; ARSAC measures it per window.</sub>
+</div>
 
 ## 🚀 Quickstart
 
 ```bash
+git clone https://github.com/DEX-zha/ARSAC-Horizon-Experiment && cd ARSAC-Horizon-Experiment
 pip install -e .        # Python ≥ 3.10; numpy/scipy/torch/scikit-learn/PyYAML
 ```
 
+Copy-paste runnable — internal forecaster on a chaotic series:
+
 ```python
+import numpy as np
 from src.horizon_estimator import HorizonEstimator
 
-# Bring YOUR forecaster: a callable (or object with .predict) fed delay
-# vectors of the standardized series, returning the next value.
-est = HorizonEstimator(model=my_model, dim=6, lag=1,
-                       alpha=0.1, tolerance=0.4, horizon_max=30)
-est.fit(my_series)                # any 1-D series, ≥ ~1000 points
+x = np.empty(4000); x[0] = 0.2
+for t in range(3999):                     # logistic map, r=4: fully chaotic
+    x[t + 1] = 4.0 * x[t] * (1.0 - x[t])
 
+est = HorizonEstimator(model="mlp", alpha=0.1, tolerance=0.4).fit(x)
 est.lower_bounds_                 # calibrated per-window lower bounds L(x)
 est.coverage_                     # empirical P(H ≥ L) on held-out windows
 print(est.report())               # R, sigma_obs, margin_real, gates, ...
 ```
 
-Or let it train an internal forecaster (`model="linear" | "mlp" | "lstm"`).
-Real-data demo on 277 years of monthly sunspots:
+Or bring **your own forecaster** — a callable (or object with `.predict`) fed delay
+vectors of the standardized series, returning the next standardized value:
+
+```python
+est = HorizonEstimator(model=my_model, dim=6, lag=1,
+                       alpha=0.1, tolerance=0.4, horizon_max=30)
+est.fit(my_series)                # any 1-D series, ≥ ~1000 points
+```
+
+Real-data demos:
 
 ```bash
-python studies/demo_real_data.py
+python studies/demo_real_data.py     # 277 years of monthly sunspots (data included)
 # → coverage 0.979 (target 0.90) · calibrated bound: 6.5 months
 # → R = 35.9, but margin_real = ×4.2  ("most of that R is noise, not model deficit")
+
+python studies/demo_bidmc.py         # ICU biosignals: PPG + ECG @ 125 Hz
+# (expects bidmc_01_Signals.csv from PhysioNet's BIDMC dataset in the repo root)
 ```
+
+## 🔧 How it works
+
+1. **Embed** — the series is standardized and delay-embedded (`dim`/`lag` selected by
+   validation when not given).
+2. **Forecast** — your model (or an internal `linear`/`mlp`/`lstm`) is rolled forward
+   from each window.
+3. **Label** — each window gets its measured horizon `H_w`: the first excursion of the
+   rolling forecast error beyond the tolerance band (right-censored labels are
+   detected and gated, not silently kept).
+4. **Calibrate** — a quantile model predicts a per-window bound, and a split-conformal
+   correction on held-out windows makes it honest: `P(H ≥ L) ≥ 1−α`, with the achieved
+   coverage reported, not assumed.
 
 ## 🦋 The floor: what R is calibrated against
 
@@ -117,7 +159,8 @@ guards, positive controls on every floor measurement.
 ## ⚙️ CLI (research pipeline)
 
 ```bash
-python -m src.horizon_experiment --dataset lorenz --model mlp     # single run
+arsac-horizon --dataset lorenz --model mlp        # console entry point (pip install -e .)
+python -m src.horizon_experiment --dataset lorenz --model mlp     # same, as a module
 python studies/benchmark_final.py                                # full benchmark (resumable)
 python chaos_quick_test.py --dataset mackey_glass                 # is my series chaotic?
 ```
@@ -144,6 +187,14 @@ docs/THEORY.md        unified theory & guarantee levels
 docs/theory/          per-study memos + versioned evidence CSVs
 tests/                225 tests incl. physics pins (λ vs literature)
 data/                 real datasets (SILSO monthly sunspots)
+paper.tex             manuscript (tables generated by studies/, not hand-copied)
+```
+
+Run the test suite:
+
+```bash
+pip install -e .[dev]
+pytest -q             # 225 tests, incl. pinned physics checks
 ```
 
 ## ⚠️ Honest limitations
@@ -154,7 +205,9 @@ data/                 real datasets (SILSO monthly sunspots)
   partially, Mackey-Glass = mapped boundary); on real data, R relies on a
   Rosenstein λ estimate and a conservative (upward-biased) noise estimator.
 - Import path is `src.*` until the package rename planned before any PyPI release.
-- One real-world case study (sunspots) so far — bring your series and be the second.
+- Real-world evidence: one fully documented case study (sunspots) plus a biosignal
+  demo in progress (BIDMC PPG/ECG, [`studies/demo_bidmc.py`](studies/demo_bidmc.py)) —
+  bring your series and widen the sample.
 
 ---
 
