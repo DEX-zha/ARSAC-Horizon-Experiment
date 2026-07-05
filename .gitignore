@@ -8,3 +8,5 @@ wandb/
 arsac_horizon.egg-info/
 tests/output_sanity/horizon_results_v*.csv
 data_sunspots.csv
+AEP_hourly.csv/
+bidmc_01_Signals.csv
