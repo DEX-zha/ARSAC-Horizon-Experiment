@@ -71,16 +71,32 @@ def main():
     ax1.plot(t, L, drawstyle="steps-mid", color=blue_hi, linewidth=1.0)
     ax1.set_ylabel("trustworthy steps  L(x$_t$)", color=grey, fontsize=9)
     ax1.set_xlabel("time (test windows)", color=grey, fontsize=9)
-    ax1.set_ylim(0, max(10, L.max() + 1))
+    ax1.set_ylim(0, max(10, L.max() + 6))
     med = float(np.median(L))
     ax1.axhline(med, color="#c8d6f0", linewidth=0.8, linestyle="--", alpha=0.6)
-    ax1.text(t[-1], med + 0.3, f"median {med:.0f}", color="#c8d6f0",
+    ax1.text(t[-1], med + 0.5, f"median {med:.0f}", color="#c8d6f0",
              fontsize=8, ha="right", alpha=0.8)
     ax1.set_title(
-        f"Calibrated trust bound per window — coverage {est.coverage_:.2f} "
-        f"(target 0.90), same system, same model",
+        f"How many forecast steps can be trusted if you start NOW? — "
+        f"coverage {est.coverage_:.2f} (target 0.90), same system, same model",
         color="#c8d6f0", fontsize=9, loc="left", pad=6,
     )
+
+    # Annotate two example instants: a comfortable start and a risky one.
+    i_lo = int(np.argmin(L))
+    smooth = np.convolve(L, np.ones(15) / 15, mode="same")
+    i_hi = int(np.argmax(smooth[30:-30])) + 30
+    for i, label, dy in (
+        (i_hi, f"start here:\n≥{L[i_hi]:.0f} steps safe", 4.5),
+        (i_lo, f"start here:\nonly {L[i_lo]:.0f} guaranteed", 4.5),
+    ):
+        ax1.annotate(
+            label, xy=(t[i], L[i]), xytext=(t[i], L[i] + dy),
+            color="#e8eefc", fontsize=8, ha="center",
+            arrowprops=dict(arrowstyle="->", color="#e8eefc", lw=0.9),
+        )
+        for ax in (ax0, ax1):
+            ax.axvline(t[i], color="#e8eefc", linewidth=0.6, alpha=0.25)
 
     fig.savefig(OUT, bbox_inches="tight", facecolor=bg)
     print(f"saved {OUT}")
