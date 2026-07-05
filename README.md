@@ -95,9 +95,11 @@ apply is the difference between a measurement and an opinion.
 <div align="center">
 <img src="assets/predictability_map.png" alt="Predictability map: calibrated lower bound L(x_t) along one trajectory" width="760"/>
 <br/>
-<sub>The calibrated bound <b>L(x_t)</b> along a single trajectory. Same system, same
-model — between 2 and 8 trustworthy steps depending on where you sit on the
-attractor. Predictability is a property of the moment; ARSAC measures it per window.</sub>
+<sub>The calibrated bound <b>L(x_t)</b> along a single Lorenz trajectory (regenerated
+by <code>studies/make_readme_figure.py</code>). Same system, same model — between 8 and
+30 trustworthy steps depending on where you sit on the attractor, coverage 0.96
+measured against a 0.90 target. Predictability is a property of the moment;
+ARSAC measures it per window.</sub>
 </div>
 
 ## Quickstart
