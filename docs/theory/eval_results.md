@@ -160,3 +160,37 @@ budget de données requis pour les systèmes lents. Les modèles forts voient pl
 loin (H_w méd 58 vs 23 sur Lorenz, 200 vs 11 sur MG) mais la borne est alors
 plus conservatrice (tightness 0.46–0.62) → la tightness pour modèles forts est
 la prochaine optimisation.
+
+## Test d'universalité (studies/study_universality.py, 2026-07-05)
+
+Hypothèse testée (candidate « loi fondamentale ») : H_w ≈ ln(τ/e₀)/(Λ_eff·dt)
+avec R = Λ_eff/λ₁ constant à travers tolérances et systèmes. Verdicts
+pré-enregistrés : **ÉCHEC partout** — et l'échec est structuré :
+
+| système/modèle | R médian (τ=0.2 / 0.4 / 0.8) |
+|---|---|
+| lorenz/linéaire | 50 / 41 / 28 |
+| rossler/linéaire | 103 / 80 / 38 |
+| mackey_glass/linéaire | 114 / 89 / 47 |
+| lorenz/MLP | 11.2 / 8.8 / 7.2 |
+
+Lectures (les trois faits importants) :
+1. **Les horizons mesurés sont limités par le modèle, pas par le chaos** :
+   le taux de croissance effectif de l'erreur est 30–110× λ₁ pour le linéaire,
+   ~10× pour le MLP. Le plancher chaotique (R→1) n'est pas atteint.
+2. R décroît avec τ → la croissance d'erreur n'est pas exponentielle à taux
+   constant (accumulation d'injection d'erreur par pas, pas divergence de
+   Lyapunov). L'invariant réel observé est **par échantillon** : Λ_eff·dt ∈
+   [0.28, 0.53] par pas à travers les 3 systèmes (linéaire, τ=0.4) — la
+   prédictibilité de ces forecasters se mesure en pas, pas en temps de Lyapunov.
+3. **R = Λ_eff/λ₁ est un diagnostic scalaire utile** : il quantifie la distance
+   au régime chaos-limité. MLP (R≈9) est 4× plus proche du plancher que le
+   linéaire (R≈40) sur Lorenz. R→1 = le forecaster a saturé la limite physique
+   de prédictibilité du système.
+
+Conséquence pour une découverte de rang supérieur : le phénomène à chasser est
+la **transition model-limited → chaos-limited** (R : 40 → 1) avec bascule de la
+distribution de H_w vers la distribution FTLE (machinerie P3 prête). Nécessite
+un forecaster de classe supérieure — NG-RC (ridge sur features polynomiales de
+retards, Gauthier 2021) atteint ~5 T_λ sur Lorenz dans la littérature et est
+trivial à intégrer comme modèle.
