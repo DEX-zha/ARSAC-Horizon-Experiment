@@ -217,6 +217,20 @@ def _load_data(args):
     return DataSplits(train_std, val_std, calib_std, test_std, train_raw, val_raw, calib_raw, test_raw)
 
 def _train_forecaster(args, device, data):
+    user_model = getattr(args, "user_model", None)
+    if user_model is not None:
+        # Bring-your-own forecaster (HorizonEstimator API): the pipeline
+        # calibrates horizons FOR the user's model instead of training one.
+        # The model consumes delay vectors of (user_dim, user_lag) built on
+        # the standardized series.
+        best = {
+            "dim": int(args.user_dim),
+            "lag": int(getattr(args, "user_lag", 1) or 1),
+            "val_loss": float("nan"),
+            "model": user_model,
+            "selection": {"metric": "user", "score": 0.0, "horizon": None},
+        }
+        return user_model, best
     forecaster = Forecaster(args, device)
     best = forecaster.select_embedding(data.train_std, data.val_std)
     model = forecaster.train_final_model(data.train_std, data.val_std)

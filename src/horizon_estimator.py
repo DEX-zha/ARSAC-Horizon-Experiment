@@ -29,8 +29,39 @@ from src.horizon_cli import build_parser
 from src.horizon_experiment import run_experiment
 
 
+class _UserModelWrapper:
+    """Adapts a user forecaster (object with .predict or plain callable).
+
+    The pipeline feeds delay vectors x of shape (dim,) built from the
+    STANDARDIZED series (mean/std of the train split) and expects the
+    standardized next value as a float.
+    """
+
+    def __init__(self, model):
+        if callable(getattr(model, "predict", None)):
+            self._predict = model.predict
+        elif callable(model):
+            self._predict = model
+        else:
+            raise TypeError("user model must be callable or expose .predict(x)")
+
+    def predict(self, x):
+        return float(self._predict(np.asarray(x, dtype=np.float64)))
+
+    def predict_batch(self, xs):
+        xs = np.asarray(xs, dtype=np.float64)
+        return np.array([self.predict(x) for x in xs], dtype=np.float64)
+
+
 class HorizonEstimator:
-    """Calibrated lower bounds on the prediction horizon of a time series."""
+    """Calibrated lower bounds on the prediction horizon of a time series.
+
+    ``model`` is either the name of an internal forecaster ("linear", "mlp",
+    "lstm") or YOUR OWN forecaster (callable or object with .predict) — in
+    that case pass ``dim`` (and optionally ``lag``): the input your model
+    expects is the delay vector (x_{t-(dim-1)lag}, ..., x_t) of the
+    standardized series, and the output the standardized next value.
+    """
 
     def __init__(
         self,
@@ -39,6 +70,8 @@ class HorizonEstimator:
         tolerance=0.4,
         horizon_max=None,
         dt=None,
+        dim=None,
+        lag=1,
         use_cuda=False,
         output_dir="outputs_estimator",
         **overrides,
@@ -48,6 +81,8 @@ class HorizonEstimator:
         self.tolerance = float(tolerance)
         self.horizon_max = horizon_max
         self.dt = dt
+        self.dim = dim
+        self.lag = lag
         self.use_cuda = bool(use_cuda)
         self.output_dir = output_dir
         self.overrides = overrides
@@ -58,7 +93,15 @@ class HorizonEstimator:
         args.dataset = "custom"
         args.custom_series = np.asarray(series, dtype=np.float64).reshape(-1)
         args.series_len = int(args.custom_series.size)
-        args.model = self.model
+        if isinstance(self.model, str):
+            args.model = self.model
+        else:
+            if self.dim is None:
+                raise TypeError("bring-your-own model requires dim= (delay vector length)")
+            args.model = "linear"  # unused placeholder for arg validation paths
+            args.user_model = _UserModelWrapper(self.model)
+            args.user_dim = int(self.dim)
+            args.user_lag = int(self.lag)
         args.calibration_alpha = self.alpha
         args.error_mode = "absolute"
         args.error_tolerance = self.tolerance
@@ -94,7 +137,31 @@ class HorizonEstimator:
         self.tightness_ = self.result_.get("tightness_ratio")
         self.horizon_certified_ = self.result_.get("horizon_certified")
         self.label_identified_ = self.result_.get("label_identified", True)
+        self._compute_r_diagnostic()
         return self
+
+    def _compute_r_diagnostic(self):
+        """R = Lambda_eff/lambda_1: distance of the model to the chaos floor.
+
+        Validated on Lorenz against paired physical twins
+        (docs/theory/chaos_floor.md): R ~ 1 means the forecaster has saturated
+        the system's physical predictability (improving the model cannot buy
+        more horizon); R >> 1 means the horizon is model-limited (improving
+        the model CAN buy ~x(R) more horizon, logarithmically in precision).
+        """
+        self.R_median_ = None
+        self.chaos_limited_ = None
+        e0 = np.asarray(self.result_.get("e0_test_values") or [], dtype=np.float64)
+        lam_step = self.result_.get("lyapunov_step")
+        if not e0.size or e0.size != self.test_horizons_.size or not lam_step or lam_step <= 0:
+            return
+        h = self.test_horizons_
+        keep = (e0 > 0) & (e0 < self.tolerance / 4.0) & (h < self.horizon_max_)
+        if keep.sum() < 20:
+            return
+        r = np.log(self.tolerance / e0[keep]) / (h[keep] * float(lam_step))
+        self.R_median_ = float(np.median(r))
+        self.chaos_limited_ = bool(self.R_median_ < 2.0)
 
     def report(self):
         """Key diagnostics as a plain dict (see docs/THEORY.md for semantics)."""
@@ -117,5 +184,16 @@ class HorizonEstimator:
             "horizon_certified": self.horizon_certified_,
             "lyapunov_per_step": r.get("lyapunov_step"),
             "embedding": (r.get("dim"), r.get("lag")),
+            "R_distance_to_chaos_floor": self.R_median_,
+            "chaos_limited": self.chaos_limited_,
+            "R_reading": (
+                None if self.R_median_ is None else
+                ("model at the physical predictability floor: a better model "
+                 "cannot buy more horizon; invest in better measurements/state "
+                 "estimation" if self.chaos_limited_ else
+                 f"horizon is model-limited (error grows ~{self.R_median_:.1f}x "
+                 "faster than the chaos floor): improving the model can extend "
+                 "the horizon")
+            ),
             "guarantee_level": "empirical (see docs/THEORY.md section 2c)",
         }

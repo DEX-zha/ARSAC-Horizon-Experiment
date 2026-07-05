@@ -32,6 +32,12 @@ def _run_conformal(ctx, base, lyap, stats, dt):
         # through the run_experiment return dict.
         stats["l_test_values"] = [float(v) for v in pred_test_cal]
         stats["h_test_values"] = [float(v) for v in sets.y_test]
+        if sets.x_test_raw.size:
+            # resid1 (one-step abs error) per window: feeds the R diagnostic
+            # R = Lambda_eff/lambda_1 (distance to the chaos floor).
+            stats["e0_test_values"] = [
+                float(v) for v in sets.x_test_raw[:, ctx.best["dim"] + 3]
+            ]
     return _finalize_conformal(stats, dt, ctx.args)
 
 

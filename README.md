@@ -70,8 +70,27 @@ print(est.report())         # diagnostics incl. label_identified, horizon_certif
 `tolerance` is a fraction of the series std ("valid time" convention). The
 coverage is empirically calibrated (see `docs/THEORY.md`, level (c)); the
 `label_identified` diagnostic warns when `horizon_max` is too short for the
-target quantile. The forecaster is internal (`linear`/`mlp`/`lstm`);
-bring-your-own-model is the next Phase 5 step.
+target quantile.
+
+**Bring your own forecaster** — the tool calibrates bounds FOR your model:
+
+```python
+est = HorizonEstimator(model=my_model, dim=6, lag=1, alpha=0.1, tolerance=0.4,
+                       horizon_max=30)
+est.fit(my_series)   # my_model: callable or object with .predict(x)->float,
+                     # fed delay vectors of the standardized series
+```
+
+The report includes **R = Λ_eff/λ₁, the measured distance of your model to the
+physical predictability floor** (validated against paired ground-truth twins on
+Lorenz, `docs/theory/chaos_floor.md`): R ≈ 1 means your model has saturated the
+system's predictability (improving it cannot buy more horizon — invest in
+better measurements); R ≫ 1 means the horizon is model-limited and a better
+model can extend it. Caveat on noisy real-world data: R measures the distance
+to the *deterministic* floor — observation noise raises the actually reachable
+floor, so part of a large R can be irreducible noise rather than model deficit.
+Real-data end-to-end demo: `python studies/demo_real_data.py`
+(monthly sunspots, internal MLP vs a user persistence model).
 
 You can switch the ODE integrator with:
 ```

@@ -50,6 +50,35 @@ def test_fit_on_custom_series_produces_calibrated_bounds():
     assert report["horizon_max"] == 15
 
 
+def test_bring_your_own_forecaster_with_r_diagnostic():
+    # Persistence "user model" via the BYO path: the pipeline must calibrate
+    # bounds FOR it and the R diagnostic must flag it as model-limited.
+    est = HorizonEstimator(
+        model=lambda x: x[-1],
+        dim=3,
+        lag=1,
+        alpha=0.1,
+        tolerance=0.4,
+        horizon_max=20,
+        quantile_ensemble=1,
+        mlp_epochs=5,
+        output_dir="outputs_estimator_test",
+    )
+    est.fit(_user_series())
+    rep = est.report()
+    assert est.lower_bounds_.size > 0
+    assert rep["coverage_test"] >= 0.75
+    assert rep["R_distance_to_chaos_floor"] is None or (
+        rep["R_distance_to_chaos_floor"] > 2.0 and rep["chaos_limited"] is False
+    )
+
+
+def test_byo_requires_dim():
+    est = HorizonEstimator(model=lambda x: x[-1])
+    with pytest.raises(TypeError):
+        est.fit(_user_series())
+
+
 def test_report_before_fit_raises():
     with pytest.raises(RuntimeError):
         HorizonEstimator().report()
