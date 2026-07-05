@@ -1,0 +1,5 @@
+system,n_windows,e0_med,H_model_med,H_twin_med,rho_med,rho_q25,rho_q75,R_model,R_twin,censored_model,censored_twin,verdict
+rossler,120,2.251e-09,2842.0,3500.0,0.8120,0.7959,0.8406,1.851,1.529,3,120,FLOOR TOUCHED
+rossler,100,1.645e-10,3993.0,6000.0,0.6796,0.6264,0.7604,1.491,1.035,0,81,NEAR FLOOR
+rossler,100,1.787e-10,3574.0,6066.5,0.6007,0.5425,0.6475,1.701,1.014,0,6,NEAR FLOOR
+mackey_glass,120,2.184e-05,85.0,1875.0,0.0447,0.0290,0.0656,20.892,0.913,0,41,MODEL-LIMITED

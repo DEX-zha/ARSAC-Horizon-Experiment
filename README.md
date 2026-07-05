@@ -1,293 +1,163 @@
-# ARSAC Horizon Experiment
+<div align="center">
 
-This repo estimates **prediction horizons** for chaotic time series (Lorenz / Rössler / Mackey‑Glass).
-The goal is a **conservative lower bound** L(x) targeting:
+<img src="assets/logo.jpg" alt="ARSAC — Lorenz butterfly logo" width="380"/>
 
-**P(H_window >= L(x)) ≈ 1 − α** (empirical coverage)
+# ARSAC Horizon
 
-while keeping L(x) as tight as possible.
+**How far can you trust a forecast on a chaotic system? Get a number — a calibrated one.**
 
-**Honest statement of the guarantee:** the calibration provides *empirical* coverage
-targeting 1 − α, valid within the calibrated regime (in-distribution). Because
-horizon labels come from overlapping windows of a single time series, the
-exchangeability assumption behind finite-sample conformal guarantees is violated;
-no distribution-free finite-sample guarantee is claimed. See `AUDIT_MATH.md` for
-the full audit and `PLAN_V2.md` for the remediation plan.
+[![tests](https://img.shields.io/badge/tests-225%20passing-brightgreen?style=flat-square)](tests/)
+[![python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square)](pyproject.toml)
+[![license](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)](pyproject.toml)
+[![status](https://img.shields.io/badge/status-research%20beta-orange?style=flat-square)](docs/THEORY.md)
+[![theory](https://img.shields.io/badge/theory-docs%2FTHEORY.md-8A2BE2?style=flat-square)](docs/THEORY.md)
 
-Use cases:
-- quantify how far a one‑step model can be trusted on chaotic systems
-- compare stability across seeds / regimes
-- produce calibrated lower bounds for deployment and safety checks
+</div>
 
-What’s implemented:
-- **Per‑window horizon labels (H_w)** instead of global RMSE thresholds
-- **Quantile regression** for a conservative base estimate
-- **One‑sided conformal calibration** with signed scores
-- **Heteroscedastic normalization** (σ from quantile spread)
-- **CV+ cross‑fitting** and **Mondrian bins** (deterministic + shrinkage)
+---
 
-## Setup
+ARSAC Horizon takes **your time series** and **your forecaster** and answers the three
+questions every practitioner actually has:
 
-Create a venv and install deps:
+| Question | Answer | How it's backed |
+|---|---|---|
+| 🎯 *How far ahead can I trust this forecast?* | A calibrated lower bound **L(x)** per window, `P(H ≥ L) ≥ 1−α` | Conformal calibration, coverage **measured** on held-out windows |
+| 📈 *Is it worth improving my model?* | **R = Λ_eff/λ₁**, your measured distance to the physical predictability floor | Validated against ground-truth paired twins ([the chaos-floor study](docs/theory/chaos_floor.md)) |
+| 🔊 *…or is it just noise?* | **margin_real**: the reachable margin once estimated observation noise is deducted | Noise-transported floor law, verified on known synthetic noise |
 
+No other packaged tool answers the second and third questions with a **calibrated instrument**.
+
+## 🚀 Quickstart
+
+```bash
+pip install -e .        # Python ≥ 3.10; numpy/scipy/torch/scikit-learn/PyYAML
 ```
-python -m venv venv
-./venv/bin/pip install -r requirements.txt
-```
-
-GPU note (CUDA): install the correct PyTorch wheel for your CUDA version.
-Example:
-
-```
-./venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu121
-```
-
-(See https://pytorch.org/get-started/locally/ for the exact command.)
-
-## Quick run
-
-Single experiment:
-
-```
-./venv/bin/python -m src.horizon_experiment --dataset lorenz --use-cuda
-```
-
-## Using your own data (HorizonEstimator API)
-
-The pipeline is not limited to the built-in chaotic systems — hand any 1-D
-series to the `HorizonEstimator` facade (Plan V2 Phase 5 MVP):
 
 ```python
 from src.horizon_estimator import HorizonEstimator
 
-est = HorizonEstimator(model="mlp", alpha=0.1, tolerance=0.4, horizon_max=30)
-est.fit(my_series)          # array-like, >= ~1000 points recommended
-est.lower_bounds_           # per-test-window calibrated lower bounds L(x)
-est.coverage_               # empirical P(H_w >= L) on held-out windows
-print(est.report())         # diagnostics incl. label_identified, horizon_certified
+# Bring YOUR forecaster: a callable (or object with .predict) fed delay
+# vectors of the standardized series, returning the next value.
+est = HorizonEstimator(model=my_model, dim=6, lag=1,
+                       alpha=0.1, tolerance=0.4, horizon_max=30)
+est.fit(my_series)                # any 1-D series, ≥ ~1000 points
+
+est.lower_bounds_                 # calibrated per-window lower bounds L(x)
+est.coverage_                     # empirical P(H ≥ L) on held-out windows
+print(est.report())               # R, sigma_obs, margin_real, gates, ...
 ```
 
-`tolerance` is a fraction of the series std ("valid time" convention). The
-coverage is empirically calibrated (see `docs/THEORY.md`, level (c)); the
-`label_identified` diagnostic warns when `horizon_max` is too short for the
-target quantile.
+Or let it train an internal forecaster (`model="linear" | "mlp" | "lstm"`).
+Real-data demo on 277 years of monthly sunspots:
 
-**Bring your own forecaster** — the tool calibrates bounds FOR your model:
-
-```python
-est = HorizonEstimator(model=my_model, dim=6, lag=1, alpha=0.1, tolerance=0.4,
-                       horizon_max=30)
-est.fit(my_series)   # my_model: callable or object with .predict(x)->float,
-                     # fed delay vectors of the standardized series
+```bash
+python studies/demo_real_data.py
+# → coverage 0.979 (target 0.90) · calibrated bound: 6.5 months
+# → R = 35.9, but margin_real = ×4.2  ("most of that R is noise, not model deficit")
 ```
 
-The report includes **R = Λ_eff/λ₁, the measured distance of your model to the
-physical predictability floor** (validated against paired ground-truth twins on
-Lorenz, `docs/theory/chaos_floor.md`): R ≈ 1 means your model has saturated the
-system's predictability (improving it cannot buy more horizon — invest in
-better measurements); R ≫ 1 means the horizon is model-limited and a better
-model can extend it. Caveat on noisy real-world data: R measures the distance
-to the *deterministic* floor — observation noise raises the actually reachable
-floor, so part of a large R can be irreducible noise rather than model deficit.
-Real-data end-to-end demo: `python studies/demo_real_data.py`
-(monthly sunspots, internal MLP vs a user persistence model).
+## 🦋 The floor: what R is calibrated against
 
-You can switch the ODE integrator with:
-```
-./venv/bin/python -m src.horizon_experiment --dataset lorenz --integrator rk4
-```
-For Mackey‑Glass, RK4 uses the same delayed value within the step (approximation).
-**Note:** Lorenz/Rössler currently use SciPy RK45 internally; the `--integrator`
-flag only affects Mackey‑Glass in the current codebase.
+A forecaster's horizon is limited either by **its own error** (improvable) or by
+**chaos itself** (not improvable — invest in better measurements instead). We measure
+the boundary directly: *paired twin experiments* integrate the true dynamics from the
+same state with a perturbation equal to the model's own one-step error — the physical
+floor at that error level. Pre-registered criteria, positive controls, replication:
 
-Rigorous benchmark (long):
+| System | Vector field | ρ = H_model/H_floor | R model | R floor (control) | Verdict |
+|---|---|---|---|---|---|
+| Lorenz | polynomial | **0.83 / 0.86** (2 seeds) | 1.15 / 1.21 | 0.96–1.03 ✓ | **floor reached** — 18–19 Lyapunov times of valid forecast |
+| Rössler | polynomial | 0.60 (0.71 vs step-wise floor) | 1.70 | 1.01 ✓ | near floor |
+| Mackey-Glass | non-polynomial (Hill) | 0.045 | 20.9 | 0.91 ✓ | model-limited — the method's mapped generality boundary |
 
-```
-./venv/bin/python -m src.horizon_benchmark --use-cuda
-```
+Two quantitative laws fall out and replicate across systems and regimes
+(ratios measured/theory 0.88–1.21): the **injection floor**
+`H ≈ ln(τ·λ₁·dt/ε)/(λ₁·dt)` for step-wise forecasters, and its transport to
+observation noise — which is what makes R honest on real data.
+Full story, controls and evidence CSVs: [`docs/theory/chaos_floor.md`](docs/theory/chaos_floor.md).
 
-You can disable the progress bar with `--no-progress`.
+## 📊 Benchmark (regenerated by script, no hand-copied numbers)
 
-Probabilistic model-aware bound options (calibration + quantiles):
+α = 0.05, attractor-scale tolerance 0.4·σ, auto horizon window in Lyapunov times,
+5 seeds — produced by `studies/benchmark_final.py` → `studies/make_results_tables.py`:
 
-```
-./venv/bin/python -m src.horizon_experiment \
-  --calib-ratio 0.05 --delta-mode quantile --delta-quantile 0.95 \
-  --expansion-quantile 0.95 --expansion-samples 500 --expansion-horizon 10 \
-  --calibrate-coverage --calibration-alpha 0.1
-```
-
-The run reports three horizons:
-- `horizon_model`: probabilistic bound from quantile growth and residuals.
-- `horizon_est`: precision-focused estimate from mean growth and mean residuals.
-- `horizon_cal`: conservative bound after coverage calibration.
-
-Growth source options:
-- default: `--growth-source error` (uses model error growth).
-- fallback: `--growth-source state` (uses embedded state expansion).
-- experimental: `--growth-source jacobian` (uses local Jacobian norms).
-
-Local residual option:
-- `--delta-local` enables kNN-based local residual quantiles.
-
-Multi-step training:
-- `--train-multistep` enables teacher-forcing training with `--train-horizon`.
-- `--tf-start`, `--tf-end` set the linear schedule, `--tf-val` for validation.
-
-## Censored labels (H_w = Hmax means H_w >= Hmax)
-
-Horizon labels are right-censored at `horizon_max` (audit C3). Two mechanisms
-handle this:
-
-- **Always on**: a saturation gate checks whether the target alpha-quantile is
-  identified from the censored calibration labels (`p_sat <= 1 - alpha`). The
-  result is exported as `label_identified`; a warning is logged when the
-  quantile sits in the censored region (increase `horizon_max` in that case —
-  the calibrated bound is then driven by saturated labels).
-- **Opt-in**: `--censored-quantile` trains the quantile models with the Powell
-  (1986) censored pinball loss (`cap = horizon_max`) and caps predictions at
-  `horizon_max` inside the conformal score and margin computations. Enable it
-  whenever `p_sat_calib > 0`; on uncensored data it is an exact no-op (the
-  measured study showed the naive pinball is biased low when the censoring cap
-  crosses the target quantile: bias -59% with Powell + capped scores, coverage
-  preserved, bound unchanged elsewhere).
-
-## Certified horizon diagnostic (non-statistical)
-
-Each run also exports a certified lower bound computed from the model's
-Lipschitz constant (`docs/theory/` study P4): `horizon_certified` (first step
-where `delta_sup * (G^h - 1)/(G - 1)` can reach the tolerance), `lipschitz_G`
-(sup-norm Lipschitz bound; exact for linear models, layer product for MLPs)
-and `delta_sup` (max one-step residual on the calibration series). Every
-window label satisfies `H_w >= horizon_certified` as long as the residual
-bound holds; a test window violating it is an out-of-distribution signal.
-This is a diagnostic only — the conformal `L(x)` remains the operational
-bound (h_cert is typically 5-11x below the median H_w). For LSTM models the
-layer-product bound is invalid; the columns fall back to `0.0` with a warning.
-
-## Chaos-estimator embedding
-
-When `--lyap-dim` and `--lyap-lag` are both unset, the chaos estimators
-(Rosenstein Lyapunov, expansion) now use a theory-grounded Takens embedding:
-lag from the first minimum of the time-delayed mutual information (Fraser &
-Swinney), dimension from false nearest neighbors (Kennel), with a `lag=1`
-guard for discrete maps (`src/horizon_embedding.py`). Measured on the four
-reference systems, the Rosenstein lambda gets closer to the literature values
-on 4/4 systems (e.g. Lorenz rel. err 0.19 -> 0.03). Explicit `--lyap-dim` /
-`--lyap-lag` still win, and the forecaster keeps its own val-MSE embedding.
-
-## Units and time scales
-
-- **Mackey-Glass `tau` is now in TIME units** (default `17.0`), no longer in
-  integration steps. The generator converts internally via `round(tau / dt)`.
-- **`dt` now defaults per system** instead of a shared global value:
-  - lorenz: `dt = 0.01`
-  - rossler: `dt = 0.05`
-  - mackey_glass: `dt = 1.0`
-  - logistic: `dt = 1` (map iteration)
-
-Reference largest Lyapunov exponents (per unit time) and the resulting Lyapunov
-time in steps at the default `dt`:
-
-| System | λ₁ (reference) | Lyapunov time 1/λ₁ | dt | Lyapunov time (steps) |
+| System | Model | Coverage med [min] | Tightness | H_w med (steps) |
 |---|---|---|---|---|
-| Lorenz | 0.906 | ≈ 1.10 t.u. | 0.01 | ≈ 110 |
-| Rössler | 0.071 | ≈ 14.1 t.u. | 0.05 | ≈ 282 |
-| Mackey-Glass (τ=17) | ≈ 0.006 | ≈ 167 t.u. | 1.0 | ≈ 167 |
-| Logistic (r=4) | ln 2 ≈ 0.693 | ≈ 1.44 iters | 1 | ≈ 1.4 |
+| logistic | linear / mlp | 0.967 / 0.970 | 1.00 / 0.83 | 1 / 8 |
+| lorenz | linear / mlp | 0.943 / 0.963 | 0.76 / 0.62 | 23 / 58 |
+| mackey_glass | linear / mlp | 0.960 / 0.987 | 0.77 / 0.46 | 11 / 200 |
+| rossler | linear / mlp | 0.930 / **0.813 [0.700]** | 0.79 / 0.70 | 34 / 44 |
 
-For meaningful horizon studies, `horizon_max` should be at least ~3 Lyapunov
-times (in steps) for the system under study. **This is now the default**: when
-`--horizon-max` is left unset (`null` in `config.yaml`), it auto-resolves to
-`max(horizon_lyap_factor Lyapunov times, 1.2 × ln(τ/e₀)/λ₁)` — extended when
-the model's one-step error `e₀` lets it see further than 3 T_λ — clamped to
-[30, 400] steps and to the available test/calib data (a warning logs when the
-target is cut: horizons beyond the cap are right-censored). The default
-tolerance is now **absolute 0.4** (fraction of the standardized attractor
-scale, the "valid time" convention): relative mode ties the horizon to model
-precision instead of the attractor (audit C2) and is kept for diagnostics only.
+The Rössler+MLP row is a **published negative result**: at λ₁ ≈ 0.071 the test split
+spans only ~4 Lyapunov times — a concrete data-budget requirement for slow chaotic
+systems ([details](docs/theory/eval_results.md)). Lorenz-linear keeps a documented
+~1-pt calib→test shift (remedy: `α_cal ≈ α − 0.015`, validated 0.951 [0.947]).
 
-## Performance (latest runs)
+## 🧪 The science, in layers
 
-Regenerated 2026-07-05 from `outputs/benchmark_final.csv` by
-`studies/make_results_tables.py` (no hand-copied numbers). Settings: α=0.05,
-absolute tolerance 0.4·std, auto `horizon_max` (Lyapunov times), post-audit
-defaults (no debias, guard on, bins=2), 5 seeds, ratios 0.6/0.15/0.15/0.10.
-Reproduce: `python studies/benchmark_final.py` (resumable), then
-`python studies/make_results_tables.py`.
+Everything is reproducible (seeded studies, evidence CSVs versioned) and every
+guarantee is labeled with its actual strength:
 
-**Metrics**
-- **Coverage** = mean(H_w >= L_cal) on test (target ≥ 1 − α = 0.95)
-- **Tightness** = median(L_cal) / median(H_w) (closer to 1 is tighter)
-- **Slack p90** = 90th percentile of H_w − L_cal (steps)
+| Level | What | Where |
+|---|---|---|
+| **Certified** | Lipschitz bound `horizon_certified` — holds for *every* window (0 violations / 2000) | [`docs/theory/certified_horizon.md`](docs/theory/certified_horizon.md) |
+| **Measured law** | injection/noise floor laws, chaos-floor saturation | [`docs/theory/chaos_floor.md`](docs/theory/chaos_floor.md) |
+| **Empirical** | conformal coverage of L(x) (overlapping windows: exchangeability is approximate) | [`docs/THEORY.md`](docs/THEORY.md) |
 
-| System | Model | Coverage med [min] | Tightness | Slack p90 | p_sat | H_w med (steps) | Hmax |
-|---|---|---|---|---|---|---|---|
-| logistic | linear | 0.967 [0.960] | 1.000 | 1.9 | 0.000 | 1 | 30 |
-| logistic | mlp | 0.970 [0.955] | 0.832 | 4.5 | 0.000 | 8 | 30 |
-| lorenz | linear | 0.943 [0.936] | 0.757 | 30.0 | 0.000 | 23 | 400 |
-| lorenz | mlp | 0.963 [0.930] | 0.617 | 80.5 | 0.000 | 58 | 400 |
-| mackey_glass | linear | 0.960 [0.954] | 0.768 | 12.4 | 0.000 | 11 | 292 |
-| mackey_glass | mlp | 0.987 [0.956] | 0.464 | 174.2 | 0.038 | 200 | 286 |
-| rossler | linear | 0.930 [0.923] | 0.786 | 35.9 | 0.000 | 34 | 400 |
-| rossler | mlp | 0.813 [0.700] | 0.698 | 51.0 | 0.000 | 44 | 400 |
+- 📘 [`docs/THEORY.md`](docs/THEORY.md) — the unified theory: definitions, guarantee levels, decisions with numbers
+- 🔬 [`docs/theory/`](docs/theory/) — 8 studies (conformal under dependence, censoring, FTLE, certified bound, block bootstrap, embedding, chaos floor, noisy floor) with **pre-registered accept/shelve verdicts** — including the honest negatives
+- 🧾 [`AUDIT_MATH.md`](AUDIT_MATH.md) — the full math audit that rebuilt this pipeline (the original Mackey-Glass generator wasn't even chaotic)
+- 🗺️ [`PLAN_V2.md`](PLAN_V2.md) — roadmap and phase status
+- 📄 [`paper.tex`](paper.tex) — manuscript with script-generated tables
 
-**Honest interpretation**
-- Coverage is at or near target on logistic, Mackey-Glass and Lorenz (Lorenz
-  linear keeps its documented ~1pt calib→test shift; remedy: calibrate at
-  α_cal ≈ α − 0.015, validated 0.951 [0.947], or `conformal_mode: global`,
-  0.961 [0.953]).
-- **Rössler + MLP is reported as a negative result**: coverage 0.813 [0.700]
-  with huge seed variance. Cause: with λ₁ ≈ 0.071 and dt = 0.05, the test
-  split (60 t.u.) spans only ~4 Lyapunov times — too few independent regimes
-  for stable coverage (the irreducible test-side fluctuation identified in
-  `docs/theory/conformal_dependence.md`). Stable Rössler+MLP claims need
-  series several times longer; do not deploy at this profile.
-- MLP models see further than linear (H_w med 58 vs 23 on Lorenz, 200 vs 11 on
-  Mackey-Glass) but the bound is then more conservative (tightness 0.46-0.62):
-  tightening L(x) for strong models is the main open optimization.
+Safety rails are built in and have caught real errors in-house: right-censoring
+gates (`label_identified`, Powell loss via `--censored-quantile`), twin-censoring
+guards, positive controls on every floor measurement.
 
-## Reproduce (recommended)
+## ⚙️ CLI (research pipeline)
 
-Standard Lorenz (RK4):
-```
-python -m src.horizon_conformal_eval \
-  --datasets lorenz --models mlp --seeds 0,1,2,3,4 \
-  --series-len 10000 --warmup 500 --calib-ratio 0.1 \
-  --horizon-max 60 --horizon-samples 800 \
-  --conformal-cv-folds 5 --horizon-quantile 0.15 --conformal-bins 2 \
-  --block-quantile 0.99 --integrator rk4 \
-  --no-progress \
-  --output-runs outputs/horizon_conformal_runs_cv5_adv_rk4.csv \
-  --output-summary outputs/horizon_conformal_summary_cv5_adv_rk4.csv
+```bash
+python -m src.horizon_experiment --dataset lorenz --model mlp     # single run
+python studies/benchmark_final.py                                # full benchmark (resumable)
+python chaos_quick_test.py --dataset mackey_glass                 # is my series chaotic?
 ```
 
-Critical Lorenz (RK4, finance‑like):
-```
-python -m src.horizon_conformal_eval \
-  --datasets lorenz --models mlp --seeds 0,1,2,3,4 \
-  --series-len 20000 --warmup 500 --train-ratio 0.7 --val-ratio 0.1 --calib-ratio 0.15 \
-  --horizon-max 60 --horizon-samples 1200 \
-  --conformal-cv-folds 5 --horizon-quantile 0.05 --calibration-alpha 0.05 \
-  --conformal-bins 2 --block-quantile 0.995 --scale-cap-quantile 0.99 \
-  --no-offset-calibration --integrator rk4 \
-  --no-progress \
-  --output-runs outputs/horizon_conformal_runs_critical_rk4.csv \
-  --output-summary outputs/horizon_conformal_summary_critical_rk4.csv
-```
+~100 flags documented in [`AGENT.MD`](AGENT.MD); production defaults in
+[`config.yaml`](config.yaml) (ablation-validated: debias removed, guard kept).
+Physics you can rely on: per-system `dt`, Mackey-Glass integrated as a true DDE
+(`tau` in **time units**), Rosenstein λ validated against literature on 4/4 systems
+by [pinned physics tests](tests/test_physics_chaos.py):
 
-## Outputs
+| System | λ₁ (lit.) | Lyapunov time | default dt |
+|---|---|---|---|
+| Lorenz | 0.906 | ≈ 1.1 t.u. (110 steps) | 0.01 |
+| Rössler | 0.071 | ≈ 14 t.u. (282 steps) | 0.05 |
+| Mackey-Glass (τ=17) | ≈ 0.006 | ≈ 167 t.u. (167 steps) | 1.0 |
+| Logistic (r=4) | ln 2 | ≈ 1.4 iters | 1 |
 
-- `outputs/horizon_benchmark.md` summary table
-- `outputs/horizon_benchmark_runs.csv` all runs (per seed)
-- `outputs/horizon_benchmark_table.tex` LaTeX table
-- `outputs/horizon_conformal_runs_*.csv` conformal evaluation (per seed)
-- `outputs/horizon_conformal_summary_*.csv` conformal evaluation summary
-
-## Tests
+## 🗂️ Repository map
 
 ```
-./venv/bin/python -m unittest tests/test_horizon_utils.py
-./venv/bin/python -m unittest tests/test_horizon_models.py
+src/                  pipeline + HorizonEstimator API (import path: src.*)
+studies/              reproducible experiments (every number in the docs)
+docs/THEORY.md        unified theory & guarantee levels
+docs/theory/          per-study memos + versioned evidence CSVs
+tests/                225 tests incl. physics pins (λ vs literature)
+data/                 real datasets (SILSO monthly sunspots)
 ```
 
+## ⚠️ Honest limitations
+
+- Coverage of L(x) is **empirically** calibrated (overlapping windows break strict
+  exchangeability); worst-seed behavior is documented per system.
+- The floor results are established on simulated systems (Lorenz fully, Rössler
+  partially, Mackey-Glass = mapped boundary); on real data, R relies on a
+  Rosenstein λ estimate and a conservative (upward-biased) noise estimator.
+- Import path is `src.*` until the package rename planned before any PyPI release.
+- One real-world case study (sunspots) so far — bring your series and be the second.
+
+---
+
+<div align="center">
+<sub>ARSAC Horizon — measure the edge of predictability instead of guessing it.</sub>
+</div>

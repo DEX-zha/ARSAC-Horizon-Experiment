@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arsac-horizon"
+version = "0.1.0"
+description = "Calibrated prediction-horizon lower bounds for chaotic and real-world time series, with a validated distance-to-predictability-floor diagnostic (R)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "ARSAC Horizon contributors" }]
+keywords = [
+    "chaos",
+    "prediction horizon",
+    "conformal prediction",
+    "lyapunov",
+    "time series",
+    "uncertainty quantification",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "torch>=2.0",
+    "scikit-learn>=1.2",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff"]
+
+[project.scripts]
+arsac-horizon = "src.horizon_cli:main"
+
+[tool.setuptools]
+# NOTE: the package currently installs under the top-level name `src`
+# (import path: `from src.horizon_estimator import HorizonEstimator`), which
+# is fine for `pip install -e .` / git installs but not for PyPI publication.
+# Renaming src/ -> arsac_horizon/ is planned before any PyPI release.
+packages = [
+    "src",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -134,3 +134,35 @@ Conséquences :
 Limites : estimateur σ̂ biaisé vers le haut (facteur ~1.7 mesuré sur Lorenz —
 non recalibré volontairement, à revalider sur d'autres systèmes) ; λ₁ estimé
 par Rosenstein sur données réelles a sa propre incertitude, non propagée.
+
+---
+
+## 7. Réplication multi-systèmes (2026-07-05, suite) — la frontière de généralité
+
+Étude `studies/study_floor_multisystem.py` (CSV : `docs/theory/data/chaos_floor_multisystem.csv`).
+Même protocole (jumeaux appariés, contrôles positifs, seuils pré-enregistrés) :
+
+| Système | Classe du champ | ρ one-shot | ρ injection | R modèle | R jumeau (contrôle) | Verdict |
+|---|---|---|---|---|---|---|
+| Lorenz | polynomial (quadratique) | 0.834 / 0.862 | 0.911 / 0.959 | 1.15 / 1.21 | 0.96–1.03 ✓ | **TOUCHÉ** ×2 seeds |
+| Rössler | polynomial (quadratique) | 0.601 | 0.707 | 1.70 | 1.01 ✓ | NEAR |
+| Mackey-Glass | **non polynomial** (Hill) + retard | 0.045 | — | 20.9 | 0.91 ✓ | MODEL-LIMITED |
+
+Faits établis :
+1. **La loi d'injection est répliquée sur un second système** : Rössler
+   mesure/théorie = 1.12 (Lorenz : 1.12–1.21). Avec le transport au bruit
+   (§6 : 0.88–0.99), la loi H ≈ ln(τ·[λdt]·/ε)/(λdt) tient sur 2 systèmes
+   × 3 régimes (injection modèle, bruit d'observation, one-shot).
+2. **Le protocole est fiable partout** : contrôles positifs R_jumeau ∈
+   [0.91, 1.03] sur les trois systèmes ; la garde anti-censure a invalidé
+   d'elle-même un premier verdict Rössler trop optimiste (jumeaux censurés).
+3. **Structurel** : à petit λ·dt (Rössler), le coût d'injection plafonne
+   ρ_one-shot ≈ 0.74 pour TOUT prédicteur pas-à-pas à e₀ ≈ 1e-10 — le
+   seuil 0.8 one-shot y est inatteignable en float64 ; la comparaison
+   équitable est le plancher d'injection (0.707 mesuré, NEAR).
+4. **La frontière de généralité est fonctionnelle, pas dimensionnelle** :
+   Mackey-Glass échoue non par le retard (l'état délai de dim 20 est bien
+   appris à un pas : e₀ = 2e-5) mais parce que le ridge polynomial ne capture
+   pas le JACOBIEN de la nonlinéarité de Hill le long de l'attracteur
+   (croissance 21× λ₁). Prédiction falsifiable : une famille rationnelle ou
+   à noyaux doit combler cet écart — c'est le prochain test.
