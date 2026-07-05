@@ -12,7 +12,7 @@ def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_initialized():
+    if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
@@ -46,12 +46,12 @@ def generate_lorenz(
         return [sigma * (y - x), x * (rho - z) - y, x * y - beta * z]
 
     total_steps = length + warmup
-    t_span = (0, total_steps * dt)
-    t_eval = np.arange(0, total_steps * dt, dt)
-    
+    t_span = (0.0, (total_steps - 1) * dt)
+    t_eval = np.linspace(0.0, (total_steps - 1) * dt, total_steps)
+
     # solve_ivp guarantees accuracy but might not match exact steps if we don't be careful.
     # We use t_eval to get the exact time points we want.
-    
+
     sol = solve_ivp(
         lorenz_deriv,
         t_span,
@@ -65,10 +65,10 @@ def generate_lorenz(
     # sol.y has shape (3, n_points)
     # We want the x-component (index 0)
     # And we discard the warmup
-    if sol.y.shape[1] < total_steps:
+    if sol.y.shape[1] != total_steps:
          # Fallback if solver fails to reach end (unlikely with RK45 on this system)
          raise RuntimeError("ODE solver failed to generate sufficient points.")
-         
+
     return sol.y[0, warmup:]
 
 
@@ -92,8 +92,8 @@ def generate_rossler(
         return [-y - z, x + a * y, b + z * (x - c)]
 
     total_steps = length + warmup
-    t_span = (0, total_steps * dt)
-    t_eval = np.arange(0, total_steps * dt, dt)
+    t_span = (0.0, (total_steps - 1) * dt)
+    t_eval = np.linspace(0.0, (total_steps - 1) * dt, total_steps)
 
     sol = solve_ivp(
         rossler_deriv,
@@ -105,7 +105,7 @@ def generate_rossler(
         atol=1e-9
     )
 
-    if sol.y.shape[1] < total_steps:
+    if sol.y.shape[1] != total_steps:
          raise RuntimeError("ODE solver failed to generate sufficient points.")
 
     return sol.y[0, warmup:]
@@ -113,36 +113,57 @@ def generate_rossler(
 
 def generate_mackey_glass(
     length,
-    tau=17,
+    tau=17.0,
     beta=0.2,
     gamma=0.1,
     n=10,
     dt=1.0,
     warmup=200,
-    integrator="euler",
+    integrator="rk4",
+    dt_int=0.1,
 ):
-    """Generates a Mackey-Glass delay differential series."""
-    total = length + warmup + tau + 1
-    x = np.zeros(total, dtype=np.float64)
-    x[: tau + 1] = 1.2
-    integrator = integrator.lower()
-    for t in range(tau, total - 1):
-        x_tau = x[t - tau]
-        if integrator == "rk4":
-            def mg_rhs(x_val, x_delayed):
-                return beta * x_delayed / (1.0 + x_delayed**n) - gamma * x_val
+    """Generates a Mackey-Glass delay differential series (method of steps).
 
-            k1 = mg_rhs(x[t], x_tau)
-            k2 = mg_rhs(x[t] + 0.5 * dt * k1, x_tau)
-            k3 = mg_rhs(x[t] + 0.5 * dt * k2, x_tau)
-            k4 = mg_rhs(x[t] + dt * k3, x_tau)
-            x[t + 1] = x[t] + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    Units: ``tau`` is the delay in TIME units (not steps), ``dt`` is the
+    output sampling interval in time units, ``warmup`` is the number of
+    output SAMPLES discarded, and ``dt_int`` is the maximum internal
+    integration step. The DDE is integrated with the method of steps on
+    a constant history x(t) = 1.2 over [-tau, 0]. RK4 uses linearly
+    interpolated delayed values at the half-step, so the formal order is
+    limited by the interpolation; this is adequate at h <= 0.1.
+    Chaos requires tau >~ 16.8 time units for the standard parameters.
+    """
+    integrator = integrator.lower()
+    substeps = max(1, int(round(dt / dt_int)))
+    h = dt / substeps
+    n_delay = max(1, int(round(tau / h)))  # delay in internal steps
+    total_samples = length + warmup
+    total_steps = total_samples * substeps
+
+    def mg_rhs(x_val, x_del):
+        return beta * x_del / (1.0 + x_del**n) - gamma * x_val
+
+    buf = np.empty(n_delay + total_steps + 1, dtype=np.float64)
+    buf[: n_delay + 1] = 1.2  # constant history on [-tau, 0]
+    for k in range(total_steps):
+        i = n_delay + k
+        xd0 = buf[i - n_delay]
+        xd1 = buf[i - n_delay + 1]
+        if integrator == "rk4":
+            xd_half = 0.5 * (xd0 + xd1)  # linear interp at t + h/2 - tau
+            k1 = mg_rhs(buf[i], xd0)
+            k2 = mg_rhs(buf[i] + 0.5 * h * k1, xd_half)
+            k3 = mg_rhs(buf[i] + 0.5 * h * k2, xd_half)
+            k4 = mg_rhs(buf[i] + h * k3, xd1)
+            buf[i + 1] = buf[i] + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
         elif integrator == "euler":
-            dx = beta * x_tau / (1.0 + x_tau**n) - gamma * x[t]
-            x[t + 1] = x[t] + dx * dt
+            buf[i + 1] = buf[i] + h * mg_rhs(buf[i], xd0)
         else:
             raise ValueError(f"Unknown integrator: {integrator}")
-    return x[tau + 1 + warmup :]
+
+    sample_idx = n_delay + np.arange(total_samples, dtype=np.int64) * substeps
+    series = buf[sample_idx]
+    return series[warmup:]
 
 
 def standardize_series(series, mean=None, std=None):
@@ -224,7 +245,12 @@ def estimate_expansion_quantile(
     seed=0,
     horizon=1,
 ):
-    """Estimates a quantile of local expansion factors in embedded space."""
+    """Estimates a quantile of local expansion factors in embedded space.
+
+    Pairs whose evolved distance d1 exceeds half the attractor diameter
+    are skipped: such divergence is saturated (capped at the attractor
+    size), and including it would bias the growth quantile downward.
+    """
     series = np.asarray(series, dtype=np.float64)
     embedded = embed_series(series, dim, lag)
     n = embedded.shape[0]
@@ -232,6 +258,8 @@ def estimate_expansion_quantile(
         raise ValueError("horizon must be >= 1")
     if n < 3:
         return 1.0, np.array([], dtype=np.float64)
+
+    diameter = float(np.linalg.norm(embedded.max(axis=0) - embedded.min(axis=0)))
 
     rng = np.random.default_rng(seed)
     max_index = n - horizon - 1
@@ -258,6 +286,9 @@ def estimate_expansion_quantile(
             continue
         d1 = np.linalg.norm(embedded[i + horizon] - embedded[j + horizon])
         if d1 <= 1e-12:
+            continue
+        if d1 > 0.5 * diameter:
+            # Saturated divergence: skip to avoid biasing the quantile down.
             continue
         ratios.append((d1 / d0) ** (1.0 / horizon))
 
@@ -318,16 +349,42 @@ def estimate_lyapunov(
     series,
     dim,
     lag,
-    max_t=25,
-    theiler=10,
-    fit_start=1,
-    fit_end=10,
+    max_t=None,
+    theiler=None,
+    fit_start=None,
+    fit_end=None,
     dt=1.0,
 ):
-    """Estimates the largest Lyapunov exponent (Rosenstein method)."""
+    """Estimates the largest Lyapunov exponent (Rosenstein method).
+
+    Returns (slope, avg_log) where slope is per SAMPLE STEP; divide by
+    ``dt`` to obtain the exponent per unit time. When left as None,
+    parameters are auto-selected: ``theiler`` from the first zero
+    crossing of the series autocorrelation, ``max_t`` from the number of
+    embedded points, and ``fit_start``/``fit_end`` by scanning for the
+    most linear region (highest R^2) of the divergence curve. Explicit
+    values bypass the auto-selection and behave as before.
+    """
     series = np.asarray(series, dtype=np.float64)
     x = embed_series(series, dim, lag)
     n = len(x)
+
+    if theiler is None:
+        centered = series - series.mean()
+        denom = float(np.dot(centered, centered))
+        max_lag = min(1000, len(series) // 2)
+        theiler = max_lag
+        if denom > 0:
+            for lag_ac in range(1, max_lag + 1):
+                ac = float(np.dot(centered[:-lag_ac], centered[lag_ac:])) / denom
+                if ac <= 0:
+                    theiler = lag_ac
+                    break
+        theiler = int(np.clip(theiler, 10, max(10, n // 10)))
+
+    if max_t is None:
+        max_t = int(np.clip(n // 4, 20, 400))
+
     if n <= max_t + 1:
         return 0.0, np.zeros(max_t, dtype=np.float64)
 
@@ -349,28 +406,62 @@ def estimate_lyapunov(
     count = np.zeros(max_t, dtype=np.float64)
     for i, j in neighbors:
         max_k = min(max_t, n - max(i, j))
-        for k in range(max_k):
-            d = np.linalg.norm(x[i + k] - x[j + k])
-            if d <= 1e-12:
-                continue
-            sum_log[k] += math.log(d)
-            count[k] += 1.0
+        d = np.linalg.norm(x[i : i + max_k] - x[j : j + max_k], axis=1)
+        ks = np.nonzero(d > 1e-12)[0]
+        sum_log[ks] += np.log(d[ks])
+        count[ks] += 1.0
 
     valid = count > 0
     avg_log = np.zeros(max_t, dtype=np.float64)
     avg_log[valid] = sum_log[valid] / count[valid]
+
+    idx = np.arange(max_t, dtype=np.float64)
+
+    if fit_start is None or fit_end is None:
+        # Auto-detect the linear region of avg_log: slide a window and
+        # keep the one whose linear fit has the highest R^2. If no window
+        # of width max_t // 4 is acceptably linear (fast systems saturate
+        # early), retry with halved widths down to 8 before falling back.
+        w = max(8, max_t // 4)
+        best_r2 = -np.inf
+        best = None
+        while True:
+            for s in range(1, max_t - w + 1):
+                sel = valid & (idx >= s) & (idx < s + w)
+                if sel.sum() < 2:
+                    continue
+                xs = idx[sel]
+                ys = avg_log[sel]
+                coeffs = np.polyfit(xs, ys, 1)
+                ss_res = float(np.sum((ys - np.polyval(coeffs, xs)) ** 2))
+                ss_tot = float(np.sum((ys - ys.mean()) ** 2))
+                if ss_tot <= 0:
+                    continue
+                r2 = 1.0 - ss_res / ss_tot
+                if r2 > best_r2:
+                    best_r2 = r2
+                    best = (s, s + w)
+            if (best is not None and best_r2 >= 0.85) or w <= 8:
+                break
+            w = max(8, w // 2)
+            best_r2 = -np.inf
+            best = None
+        if best is None or best_r2 < 0.85:
+            best = (1, max(10, max_t // 3))
+        if fit_start is None:
+            fit_start = best[0]
+        if fit_end is None:
+            fit_end = best[1]
 
     fit_end = min(fit_end, max_t)
     fit_start = min(fit_start, fit_end - 1)
     if fit_end - fit_start < 2:
         return 0.0, avg_log
 
-    idx = np.arange(max_t, dtype=np.float64)
     use = valid & (idx >= fit_start) & (idx < fit_end)
     if use.sum() < 2:
         return 0.0, avg_log
 
     slope, _ = np.polyfit(idx[use], avg_log[use], 1)
-    # Slope is per-step (sample index). Convert to per-time externally if needed.
-    _ = dt
+    # Slope is per SAMPLE STEP; divide by dt for the exponent per unit time.
     return slope, avg_log

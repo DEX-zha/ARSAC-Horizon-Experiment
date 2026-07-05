@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
+from src.horizon_censoring import saturation_gate
 from src.horizon_conformal import (
     ConformalTreeEstimator,
     assign_bin_ids,
@@ -20,8 +23,21 @@ from src.horizon_experiment_core import (
 )
 
 
+def _censored_pred(pred, args):
+    """Caps predictions at horizon_max when --censored-quantile is on.
+
+    Measured requirement (study P2): with the Powell loss the raw signed
+    score pred - y inflates the conformal margin (mean L 8.940 vs 9.290);
+    capping the prediction restores a near-nominal margin. Both labels and
+    capped predictions live in [0, Hmax], so the score stays informative.
+    """
+    if getattr(args, "censored_quantile", False) and pred.size:
+        return np.minimum(pred, float(args.horizon_max))
+    return pred
+
+
 def _compute_scores(pred_calib, y_calib, sigma_calib, use_sigma, args):
-    signed = pred_calib - y_calib
+    signed = _censored_pred(pred_calib, args) - y_calib
     if use_sigma:
         scores = signed / np.maximum(sigma_calib, args.scale_floor)
     else:
@@ -202,7 +218,7 @@ def _predict_bin_c(bin_model, pred_test, x_test_raw, args, best, c_global):
 
 def _calib_interval(pred_calib, c_calib, sigma_calib, use_sigma, args, constants):
     sigma_term = sigma_calib if use_sigma else np.ones_like(c_calib)
-    return _clip_horizon(pred_calib - c_calib * sigma_term, args, constants)
+    return _clip_horizon(_censored_pred(pred_calib, args) - c_calib * sigma_term, args, constants)
 
 
 
@@ -302,6 +318,13 @@ def _conformal_c_test(model, preds, sets, constants, ctx):
 
 
 def _calibrate_conformal(ctx, sets, preds, use_sigma, constants, stats):
+    # Always-on identification check (audit C3): H_w == Hmax means
+    # H_true >= Hmax, and the target quantile is identified from censored
+    # labels only when p_sat <= 1 - alpha.
+    gate = saturation_gate(sets.y_calib, ctx.args.horizon_max, ctx.args.calibration_alpha)
+    stats["label_identified"] = gate["identified"]
+    if not gate["identified"]:
+        logging.warning("Saturation gate (calibration labels): %s", gate["message"])
     scores, signed = _compute_scores(preds.pred_calib, sets.y_calib, preds.sigma_calib, use_sigma, ctx.args)
     stats.update(_score_distribution_stats(scores, constants))
     stats.update(_score_signal_stats(signed, preds.pred_calib, sets.y_calib, preds.sigma_calib, use_sigma, constants))

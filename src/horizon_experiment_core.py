@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+import logging
 import math
 import os
 
@@ -11,9 +12,17 @@ import numpy as np
 import torch
 import yaml
 
+from src.horizon_certified import certified_horizon
 from src.horizon_data import DataManager
+from src.horizon_embedding import select_embedding
 from src.horizon_forecast import Forecaster
-from src.horizon_metrics import evaluate_mse, horizon_from_lyapunov, horizon_from_rmse, rolling_rmse
+from src.horizon_metrics import (
+    compute_calibration_residuals,
+    evaluate_mse,
+    horizon_from_lyapunov,
+    horizon_from_rmse,
+    rolling_rmse,
+)
 from src.horizon_utils import build_supervised, estimate_lyapunov, set_seed
 
 DEFAULT_CONSTANTS_PATH = os.path.abspath(
@@ -43,6 +52,8 @@ DEFAULT_STATS: Dict[str, Any] = {
     "horizon_model_cal": 0.0,
     "horizon_model_cal_time": 0.0,
     "coverage_test": None,
+    "coverage_hits": None,
+    "test_samples": None,
     "tightness_ratio": None,
     "slack_median": None,
     "slack_p90": None,
@@ -76,6 +87,10 @@ DEFAULT_STATS: Dict[str, Any] = {
     "debias_quantile": None,
     "predictability_corr_jac": None,
     "predictability_corr_resid": None,
+    "label_identified": None,
+    "horizon_certified": 0.0,
+    "lipschitz_G": 0.0,
+    "delta_sup": 0.0,
 }
 
 @dataclass
@@ -173,7 +188,9 @@ def _seed_with_base(seed, constants, base_key, fold_idx=0):
     return seed + base + fold_idx * stride
 
 def _resolve_dt(args):
-    return args.dt if args.dataset != "logistic" else 1.0
+    from src.horizon_cli import resolve_dt
+
+    return resolve_dt(args.dataset, args.dt)
 
 def _horizon_time(steps, dt):
     return steps * dt if math.isfinite(steps) else float("inf")
@@ -211,7 +228,10 @@ def _test_mse(model, test_std, best, device):
 
 def _base_metrics(model, data, best, args, device, dt):
     test_mse = _test_mse(model, data.test_std, best, device)
-    rmse_by_h = rolling_rmse(model, data.test_std, best["dim"], best["lag"], args.horizon_max)
+    rmse_by_h = rolling_rmse(
+        model, data.test_std, best["dim"], best["lag"], args.horizon_max,
+        max_windows=800, seed=args.seed,
+    )
     base_err = rmse_by_h[0] if rmse_by_h.size else 0.0
     tolerance = _tolerance_from_mode(base_err, args)
     horizon_real = horizon_from_rmse(rmse_by_h, tolerance)
@@ -219,9 +239,24 @@ def _base_metrics(model, data, best, args, device, dt):
     return BaseMetrics(test_mse, rmse_by_h, base_err, tolerance, horizon_real, horizon_real_time)
 
 def _lyapunov_metrics(data, best, args, base_err, tolerance, dt):
-    lyap_dim = args.lyap_dim if args.lyap_dim is not None else best["dim"]
-    lyap_lag = args.lyap_lag if args.lyap_lag is not None else best["lag"]
     series = np.concatenate([data.train_raw, data.val_raw])
+    lyap_dim = args.lyap_dim
+    lyap_lag = args.lyap_lag
+    if lyap_dim is None and lyap_lag is None:
+        # Theory-grounded embedding for the chaos estimators (Plan V2 Phase 1):
+        # lag from the first mutual-information minimum, dim from false
+        # nearest neighbors. The forecaster keeps its val-MSE embedding;
+        # explicit --lyap-dim/--lyap-lag still win (handled above).
+        try:
+            emb = select_embedding(series)
+            lyap_dim = int(emb["dim"])
+            lyap_lag = int(emb["lag"])
+        except Exception as exc:  # never crash a run on a diagnostic
+            logging.warning("select_embedding failed (%s); falling back to model embedding", exc)
+    if lyap_dim is None:
+        lyap_dim = best["dim"]
+    if lyap_lag is None:
+        lyap_lag = best["lag"]
     lyap_step, _ = estimate_lyapunov(
         series,
         dim=lyap_dim,
@@ -243,8 +278,84 @@ def _init_stats(args):
     stats["growth_horizon"] = args.expansion_horizon
     return stats
 
+def _certified_stats(model, data, best, tolerance, stats):
+    """Exports the certified (non-statistical) horizon diagnostic (study P4).
+
+    h_cert = first 1-indexed step where delta*(G^h-1)/(G-1) can reach the
+    tolerance; every window label satisfies H_w >= h_cert as long as delta
+    bounds the one-step residual. Diagnostic only: the conformal L(x) stays
+    the operational bound. Exceptions (e.g. LSTM, where the layer-product
+    Lipschitz bound is invalid) fall back to 0.0 with a warning.
+    """
+    try:
+        h_cert, growth, delta = certified_horizon(
+            model, data.calib_series(), best["dim"], best["lag"], tolerance
+        )
+        stats["horizon_certified"] = float(h_cert)
+        stats["lipschitz_G"] = float(growth)
+        stats["delta_sup"] = float(delta)
+    except Exception as exc:
+        logging.warning("certified horizon unavailable (%s); exporting 0.0", exc)
+        stats["horizon_certified"] = 0.0
+        stats["lipschitz_G"] = 0.0
+        stats["delta_sup"] = 0.0
+    return stats
+
 def _delta_local_quantile(args):
     return args.delta_local_quantile if args.delta_local_quantile is not None else args.delta_quantile
+
+def _resolve_horizon_max_for_run(args, data, best, dt, model):
+    """Resolves horizon_max in Lyapunov times (audit A3) with a data budget.
+
+    Auto mode (args.horizon_max is None) targets horizon_lyap_factor
+    Lyapunov times, then clamps so that the test and calibration splits
+    still contain enough rollout windows. Explicit values are respected
+    unchanged (legacy behavior).
+    """
+    from src.horizon_cli import DEFAULT_LAMBDA, resolve_horizon_max
+
+    resolved, target = resolve_horizon_max(
+        args.dataset, dt, args.horizon_max, getattr(args, "horizon_lyap_factor", 3.0)
+    )
+    if args.horizon_max is not None:
+        return int(args.horizon_max)
+    # Refine the Lyapunov-times target with the model's actual one-step error:
+    # a good model can be trusted beyond 3 T_lambda before reaching tolerance
+    # (H_theory ~ ln(tol/e0)/lambda), so take max(3 T_lambda, 1.2 * H_theory),
+    # still capped at 400 steps for rollout cost.
+    lam = DEFAULT_LAMBDA.get(args.dataset, 0.0)
+    if lam > 0.0 and dt > 0.0:
+        _, residuals = compute_calibration_residuals(
+            model, data.calib_series(), best["dim"], best["lag"]
+        )
+        if residuals.size:
+            e0 = float(np.sqrt(np.mean(residuals**2)))
+            tol_est = (
+                e0 * args.error_factor
+                if args.error_mode == "relative"
+                else float(args.error_tolerance)
+            )
+            if e0 > 0.0 and tol_est > e0:
+                h_theory = math.log(tol_est / e0) / (lam * dt)
+                refined = int(math.ceil(1.2 * h_theory))
+                if refined > resolved:
+                    target = max(target or 0, refined)
+                    resolved = min(refined, 400)
+    window_len = (best["dim"] - 1) * best["lag"] + 1
+    budget = min(len(data.test_std), len(data.calib_series())) - window_len - 10
+    clamped = int(max(10, min(resolved, max(10, budget // 2))))
+    if target is not None and clamped < target:
+        logging.warning(
+            "horizon_max auto: %d steps < target %d (%.1f Lyapunov times wanted); "
+            "horizons beyond %d are right-censored — increase series_len or "
+            "test/calib ratios for a chaos-limited horizon study.",
+            clamped, target, getattr(args, "horizon_lyap_factor", 3.0), clamped,
+        )
+    else:
+        logging.info("horizon_max auto-resolved to %d steps (~%.1f Lyapunov times)",
+                     clamped, clamped * dt * DEFAULT_LAMBDA.get(args.dataset, 0.0))
+    return clamped
+
 
 def _experiment_setup(args):
     constants = _load_constants(_constants_path(args))
@@ -253,9 +364,11 @@ def _experiment_setup(args):
     data = _load_data(args)
     model, best = _train_forecaster(args, device, data)
     dt = _resolve_dt(args)
+    args.horizon_max = _resolve_horizon_max_for_run(args, data, best, dt, model)
     base = _base_metrics(model, data, best, args, device, dt)
     lyap = _lyapunov_metrics(data, best, args, base.base_err, base.tolerance, dt)
     stats = _init_stats(args)
+    stats = _certified_stats(model, data, best, base.tolerance, stats)
     ctx = ExperimentContext(args=args, constants=constants, device=device, data=data, model=model, best=best)
     exp_dim = args.expansion_dim if args.expansion_dim is not None else lyap.dim
     exp_lag = args.expansion_lag if args.expansion_lag is not None else lyap.lag

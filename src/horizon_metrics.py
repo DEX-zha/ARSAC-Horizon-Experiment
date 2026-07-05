@@ -78,8 +78,14 @@ def estimate_error_growth(
     quantile=0.95,
     seed=0,
     eps=1e-8,
+    sat_cap=2.0,
 ):
-    """Estimates growth rates from multi-step prediction errors."""
+    """Estimates growth rates from multi-step prediction errors.
+
+    Log-ratios are only accumulated while both consecutive errors stay below
+    ``sat_cap`` (standardized units), excluding the saturated regime where
+    error growth flattens at attractor scale.
+    """
     series_std = np.asarray(series_std, dtype=np.float64)
     window_len = (dim - 1) * lag + 1
     n = len(series_std) - window_len - horizon
@@ -101,7 +107,12 @@ def estimate_error_growth(
             pred = model.predict(x)
             true = series_std[start + (dim - 1) * lag + h + 1]
             err = abs(pred - true)
-            if prev_err is not None:
+            if (
+                prev_err is not None
+                and prev_err > eps
+                and prev_err < sat_cap
+                and err < sat_cap
+            ):
                 log_ratios.append(math.log((err + eps) / (prev_err + eps)))
             prev_err = err
             history.append(pred)
@@ -186,7 +197,9 @@ def estimate_jacobian_growth(
         norm = float(np.linalg.norm(weights))
         return norm, norm, np.array([norm], dtype=np.float64)
 
+    was_training = None
     if isinstance(model, (TorchWrapper, TorchSeqWrapper)):
+        was_training = model.model.training
         model.model.eval()
 
     norms = []
@@ -196,11 +209,12 @@ def estimate_jacobian_growth(
             x_t = torch.tensor(
                 x, dtype=torch.float32, device=model.device, requires_grad=True
             ).view(1, -1, 1)
-            out = model.model(x_t)
-            out = out.squeeze()
-            if out.ndim > 0:
-                out = out.sum()
-            grad = torch.autograd.grad(out, x_t, retain_graph=False)[0]
+            with torch.backends.cudnn.flags(enabled=False):
+                out = model.model(x_t)
+                out = out.squeeze()
+                if out.ndim > 0:
+                    out = out.sum()
+                grad = torch.autograd.grad(out, x_t, retain_graph=False)[0]
             norm = float(torch.norm(grad).item())
         elif isinstance(model, TorchWrapper):
             x_t = torch.tensor(
@@ -213,11 +227,24 @@ def estimate_jacobian_growth(
             grad = torch.autograd.grad(out, x_t, retain_graph=False)[0]
             norm = float(torch.norm(grad).item())
         else:
+            if was_training is not None:
+                model.model.train(was_training)
             return 1.0, 1.0, np.array([], dtype=np.float64)
         norms.append(norm)
 
     if not norms:
+        if was_training is not None:
+            model.model.train(was_training)
         return 1.0, 1.0, np.array([], dtype=np.float64)
+
+    norms = np.asarray(norms, dtype=np.float64)
+    norm_q = float(np.quantile(norms, quantile))
+    norm_mean = float(np.mean(norms))
+    norm_q = max(norm_q, 1e-6)
+    norm_mean = max(norm_mean, 1e-6)
+    if was_training is not None:
+        model.model.train(was_training)
+    return norm_q, norm_mean, norms
 
 
 def _predict_one_step(model, x):
@@ -256,13 +283,6 @@ def gated_rollout(model, series_std, dim, lag, l_values, horizon_max=None):
         horizons.append(max_h)
     return paths, np.asarray(horizons, dtype=np.int64)
 
-    norms = np.asarray(norms, dtype=np.float64)
-    norm_q = float(np.quantile(norms, quantile))
-    norm_mean = float(np.mean(norms))
-    norm_q = max(norm_q, 1e-6)
-    norm_mean = max(norm_mean, 1e-6)
-    return norm_q, norm_mean, norms
-
 
 def jacobian_norm(model, x):
     """Computes a local Jacobian norm for a single input."""
@@ -271,16 +291,22 @@ def jacobian_norm(model, x):
         return float(np.linalg.norm(weights))
 
     if isinstance(model, TorchSeqWrapper):
+        was_training = model.model.training
+        model.model.eval()
         x_t = torch.tensor(
             x, dtype=torch.float32, device=model.device, requires_grad=True
         ).view(1, -1, 1)
-        out = model.model(x_t)
-        out = out.squeeze()
-        if out.ndim > 0:
-            out = out.sum()
-        grad = torch.autograd.grad(out, x_t, retain_graph=False)[0]
+        with torch.backends.cudnn.flags(enabled=False):
+            out = model.model(x_t)
+            out = out.squeeze()
+            if out.ndim > 0:
+                out = out.sum()
+            grad = torch.autograd.grad(out, x_t, retain_graph=False)[0]
+        model.model.train(was_training)
         return float(torch.norm(grad).item())
     if isinstance(model, TorchWrapper):
+        was_training = model.model.training
+        model.model.eval()
         x_t = torch.tensor(
             x, dtype=torch.float32, device=model.device, requires_grad=True
         ).view(1, -1)
@@ -289,6 +315,7 @@ def jacobian_norm(model, x):
         if out.ndim > 0:
             out = out.sum()
         grad = torch.autograd.grad(out, x_t, retain_graph=False)[0]
+        model.model.train(was_training)
         return float(torch.norm(grad).item())
 
     return 0.0
@@ -334,7 +361,15 @@ def build_horizon_dataset(
     feature_horizon=3,
     eps=1e-8,
 ):
-    """Builds horizon features and per-window horizon labels for conformal training."""
+    """Builds horizon features and per-window horizon labels for conformal training.
+
+    Label: first horizon h where ``consecutive_k`` consecutive per-step absolute
+    errors ``|pred - true|`` exceed the tolerance, else ``horizon_max``
+    (right-censored). In ``relative`` mode the tolerance is
+    ``max(median(one-step residuals over sampled windows), 1e-6) * error_factor``,
+    computed once for the whole dataset; in ``absolute`` mode it is the
+    ``tolerance`` argument.
+    """
     series_std = np.asarray(series_std, dtype=np.float64)
     window_len = (dim - 1) * lag + 1
     n = len(series_std) - window_len - horizon_max
@@ -350,6 +385,20 @@ def build_horizon_dataset(
         indices = rng.choice(indices, size=max_windows, replace=False)
     indices = np.sort(indices)
 
+    tolerance_local = tolerance
+    if error_mode == "relative":
+        resid1_all = []
+        for start in indices:
+            history = series_std[start : start + window_len]
+            x0 = np.array([history[i * lag] for i in range(dim)], dtype=np.float64)
+            pred0 = float(model.predict(x0))
+            true0 = series_std[start + (dim - 1) * lag + 1]
+            resid1_all.append(abs(pred0 - true0))
+        if resid1_all:
+            tolerance_local = (
+                max(float(np.median(resid1_all)), 1e-6) * error_factor
+            )
+
     features = []
     targets = []
     for start in indices:
@@ -363,6 +412,7 @@ def build_horizon_dataset(
 
         hist = history.copy()
         errors = np.zeros(horizon_max, dtype=np.float64)
+        step_err = np.zeros(horizon_max, dtype=np.float64)
         jac_values = []
         preds = []
         for h in range(horizon_max):
@@ -371,6 +421,7 @@ def build_horizon_dataset(
             true = series_std[start + (dim - 1) * lag + h + 1]
             err = pred - true
             errors[h] = err * err
+            step_err[h] = abs(err)
             if use_jacobian and h < feature_horizon:
                 jac_values.append(jacobian_norm(model, np.asarray(x, dtype=np.float64)))
             if h < feature_horizon:
@@ -378,14 +429,8 @@ def build_horizon_dataset(
             hist.append(pred)
             hist.pop(0)
 
-        rmse_by_h = np.sqrt(np.cumsum(errors) / np.arange(1, horizon_max + 1))
-        if error_mode == "relative":
-            tolerance_local = rmse_by_h[0] * error_factor
-        else:
-            tolerance_local = tolerance
-
         horizon = horizon_from_window_rmse(
-            rmse_by_h, tolerance_local, consecutive=consecutive_k
+            step_err, tolerance_local, consecutive=consecutive_k
         )
 
         jac_mean = jac_norm0
@@ -422,17 +467,28 @@ def build_horizon_dataset(
     )
 
 
-def rolling_rmse(model, series_std, dim, lag, horizon_max):
-    """Computes multi-step RMSE by rolling autoregression."""
+def rolling_rmse(model, series_std, dim, lag, horizon_max, max_windows=None, seed=0):
+    """Computes multi-step RMSE by rolling autoregression.
+
+    When ``max_windows`` is set and fewer than the available windows, a
+    seeded uniform subsample of start indices is used: this is a Monte-Carlo
+    estimate of the same RMSE curve, bounding the O(n_windows * horizon_max)
+    rollout cost when horizon_max spans several Lyapunov times.
+    """
     series_std = np.asarray(series_std, dtype=np.float64)
     window_len = (dim - 1) * lag + 1
     n = len(series_std) - window_len - horizon_max
     if n <= 0:
         return np.full(horizon_max, np.nan, dtype=np.float64)
 
+    starts = np.arange(n, dtype=np.int64)
+    if max_windows is not None and max_windows < n:
+        rng = np.random.default_rng(seed)
+        starts = np.sort(rng.choice(starts, size=int(max_windows), replace=False))
+
     errors = np.zeros(horizon_max, dtype=np.float64)
     count = np.zeros(horizon_max, dtype=np.float64)
-    for start in range(n):
+    for start in starts:
         history = list(series_std[start : start + window_len])
         for h in range(horizon_max):
             x = [history[i * lag] for i in range(dim)]
@@ -447,8 +503,14 @@ def rolling_rmse(model, series_std, dim, lag, horizon_max):
     return rmse
 
 
-def window_horizons(model, series_std, dim, lag, horizon_max, tolerance):
-    """Computes per-window horizons using absolute error threshold."""
+def window_horizons(model, series_std, dim, lag, horizon_max, tolerance, consecutive=2):
+    """Computes per-window horizons using per-step absolute errors.
+
+    Rolls out autoregressively to ``horizon_max`` and returns the first
+    1-indexed horizon where ``consecutive`` successive per-step absolute
+    errors reach ``tolerance``, else ``horizon_max`` (right-censored).
+    ``init_errs`` holds the h=1 absolute error of each window.
+    """
     series_std = np.asarray(series_std, dtype=np.float64)
     window_len = (dim - 1) * lag + 1
     n = len(series_std) - window_len - horizon_max
@@ -459,24 +521,19 @@ def window_horizons(model, series_std, dim, lag, horizon_max, tolerance):
     init_errs = []
     for start in range(n):
         history = list(series_std[start : start + window_len])
-        horizon = horizon_max
-        init_err = None
+        step_err = np.zeros(horizon_max, dtype=np.float64)
         for h in range(horizon_max):
             x = [history[i * lag] for i in range(dim)]
             pred = model.predict(x)
             true = series_std[start + (dim - 1) * lag + h + 1]
-            err = abs(pred - true)
-            if h == 0:
-                init_err = err
-            if err >= tolerance:
-                horizon = h + 1
-                break
+            step_err[h] = abs(pred - true)
             history.append(pred)
             history.pop(0)
-        if init_err is None:
-            continue
+        horizon = horizon_from_window_rmse(
+            step_err, tolerance, consecutive=consecutive
+        )
         horizons.append(horizon)
-        init_errs.append(init_err)
+        init_errs.append(step_err[0])
 
     return np.array(horizons, dtype=np.float64), np.array(init_errs, dtype=np.float64)
 

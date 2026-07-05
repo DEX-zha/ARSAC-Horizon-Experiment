@@ -1,5 +1,6 @@
 
 import numpy as np
+from src.horizon_cli import resolve_dt
 from src.horizon_utils import (
     generate_logistic_map,
     generate_lorenz,
@@ -23,7 +24,18 @@ class DataManager:
         self.std = None
 
     def load_series(self):
-        """Generates the selected chaotic time series."""
+        """Generates the selected chaotic time series (or uses a user series).
+
+        When ``args.custom_series`` is set (HorizonEstimator API), the raw
+        1-D array is used directly and no synthetic system is generated.
+        """
+        custom = getattr(self.args, "custom_series", None)
+        if custom is not None:
+            self.raw_series = np.asarray(custom, dtype=np.float64).reshape(-1)
+            if self.raw_series.size < 100:
+                raise ValueError("custom series too short (need >= 100 points)")
+            return self.raw_series
+        dt = resolve_dt(self.args.dataset, self.args.dt)
         if self.args.dataset == "logistic":
             self.raw_series = generate_logistic_map(
                 self.args.series_len, r=self.args.r, x0=self.args.x0, warmup=self.args.warmup
@@ -31,7 +43,7 @@ class DataManager:
         elif self.args.dataset == "lorenz":
             self.raw_series = generate_lorenz(
                 self.args.series_len,
-                dt=self.args.dt,
+                dt=dt,
                 sigma=self.args.sigma,
                 rho=self.args.rho,
                 beta=self.args.beta,
@@ -41,7 +53,7 @@ class DataManager:
         elif self.args.dataset == "rossler":
             self.raw_series = generate_rossler(
                 self.args.series_len,
-                dt=self.args.dt,
+                dt=dt,
                 a=self.args.a,
                 b=self.args.b,
                 c=self.args.c,
@@ -55,7 +67,7 @@ class DataManager:
                 beta=self.args.mg_beta,
                 gamma=self.args.gamma,
                 n=self.args.n,
-                dt=self.args.dt,
+                dt=dt,
                 warmup=self.args.warmup,
                 integrator=self.args.integrator,
             )

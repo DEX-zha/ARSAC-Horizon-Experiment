@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
+from src.horizon_censoring import saturation_gate
 from src.horizon_metrics import (
     compute_calibration_residuals,
     estimate_error_growth,
@@ -132,7 +135,10 @@ def _horizon_ratio_list(calib_horizons, calib_init_errs, growth_q, model_error, 
 
 
 def _calib_horizon_ratios(model, calib_series, best, args, growth_q, model_error):
-    rmse_calib = rolling_rmse(model, calib_series, best["dim"], best["lag"], args.horizon_max)
+    rmse_calib = rolling_rmse(
+        model, calib_series, best["dim"], best["lag"], args.horizon_max,
+        max_windows=800, seed=args.seed,
+    )
     base_err_calib = rmse_calib[0] if rmse_calib.size else 0.0
     tolerance_calib = _tolerance_from_mode(base_err_calib, args)
     calib_horizons, calib_init_errs = window_horizons(
@@ -149,14 +155,29 @@ def _calib_horizon_ratios(model, calib_series, best, args, growth_q, model_error
 
 
 def _calibration_scale(args, ratios):
+    """Calibrate a shrink factor for a conservative lower bound L = h_model * scale.
+
+    ratios = h_real / h_model on calibration windows. Taking the ALPHA-quantile
+    (not 1-alpha) shrinks the bound so that ~ (1-alpha) of calibration windows
+    satisfy h_real >= h_model * scale, i.e. P(H_real >= L) >= 1 - alpha.
+    Note: h_model itself is a heuristic (the growth quantile is not a sup), so
+    L is only calibrated empirically, not a formal guarantee.
+    """
     if args.calibrate_coverage and ratios:
-        scale = float(np.quantile(ratios, 1.0 - args.calibration_alpha))
+        scale = float(np.quantile(ratios, args.calibration_alpha))
         return max(scale, args.calibration_floor)
     return 1.0
 
 
 
 def _coverage_from_ratios(ratios, calib_horizons, calib_init_errs, growth_q, model_error, tolerance_calib, scale):
+    """Empirical coverage of the lower bound L = h_model * scale on calibration windows.
+
+    coverage = fraction of calibration windows with H_real >= L. Windows with
+    h_model <= 0 give L = 0 and are trivially covered, so they count as hits
+    (skipping them would be selection bias). h_model is a heuristic bound
+    (growth quantile is not a sup); coverage is empirical only.
+    """
     if not ratios:
         return None, 0
     hits = 0
@@ -165,10 +186,11 @@ def _coverage_from_ratios(ratios, calib_horizons, calib_init_errs, growth_q, mod
         if init_err is None:
             continue
         h_model = horizon_from_model_bound_by_growth(growth_q, init_err, model_error, tolerance_calib)
-        if h_model <= 0:
-            continue
         total += 1
-        if h_model * scale >= h_real:
+        if h_model <= 0:
+            hits += 1
+            continue
+        if h_real >= h_model * scale:
             hits += 1
     return hits / total if total > 0 else None, total
 
@@ -222,12 +244,29 @@ def _probabilistic_growth(ctx, calib_series, x_calib, exp_series, exp_dim, exp_l
 
 
 
-def _probabilistic_calibration(ctx, calib_series, growth_q, model_error):
+def _probabilistic_calibration(ctx, calib_series, growth_q, model_error, stats=None):
     ratios, calib_horizons, calib_init_errs, tol_calib = _calib_horizon_ratios(ctx.model, calib_series, ctx.best, ctx.args, growth_q, model_error)
+    if stats is not None:
+        _apply_saturation_gate(stats, calib_horizons, ctx.args)
     scale = _calibration_scale(ctx.args, ratios)
     coverage, samples = _coverage_from_ratios(ratios, calib_horizons, calib_init_errs, growth_q, model_error, tol_calib, scale)
     return scale, coverage, samples
 
+
+
+def _apply_saturation_gate(stats, calib_horizons, args):
+    """Always-on identification check on the calibration horizon labels.
+
+    H_w == Hmax is right-censored (audit C3): the target alpha-quantile is
+    identified only when p_sat <= 1 - alpha. Stored as stats['label_identified']
+    with a warning when not identified; the run is not invalidated here.
+    """
+    gate = saturation_gate(
+        np.asarray(calib_horizons, dtype=np.float64), args.horizon_max, args.calibration_alpha
+    )
+    stats["label_identified"] = gate["identified"]
+    if not gate["identified"]:
+        logging.warning("Saturation gate (calibration horizons): %s", gate["message"])
 
 
 def _run_probabilistic(ctx, base, lyap, stats, dt):
@@ -236,7 +275,7 @@ def _run_probabilistic(ctx, base, lyap, stats, dt):
     x_calib, model_error, model_error_mode, model_error_mean, delta_local_used = _estimate_model_error(ctx.args, ctx.model, ctx.data.calib_std, ctx.best, delta_local_quantile)
     expansion_q, expansion_mean, growth_q, growth_mean = _probabilistic_growth(ctx, calib_series, x_calib, exp_series, exp_dim, exp_lag)
     h_model, h_est = _probabilistic_horizons(base.base_err, base.tolerance, model_error, model_error_mean, growth_q, growth_mean)
-    scale, coverage, samples = _probabilistic_calibration(ctx, calib_series, growth_q, model_error)
+    scale, coverage, samples = _probabilistic_calibration(ctx, calib_series, growth_q, model_error, stats)
     _set_prob_stats(stats, model_error, model_error_mode, model_error_mean, delta_local_used, expansion_q, expansion_mean, growth_q, growth_mean, h_model, h_est, scale, coverage, samples, ctx.args.growth_source, ctx.args.expansion_horizon)
     return _finalize_probabilistic_stats(stats, dt)
 

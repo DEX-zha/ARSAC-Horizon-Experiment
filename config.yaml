@@ -41,14 +41,18 @@ lstm_batch: 64
 lstm_patience: 12
 
 # Selection
-horizon_max: 30
+horizon_max: null  # auto: horizon_lyap_factor Lyapunov times, clamped to [30, 400] and to the data budget
+horizon_lyap_factor: 3.0
 selection_metric: val_mse
 selection_horizon_max: 20
 
 # Error Bounds
-error_mode: relative
+# Tolerance at attractor scale (fraction of the standardized series std),
+# the "valid time" convention (audit C2). Relative mode ties the horizon to
+# model precision instead of the attractor and is kept only for diagnostics.
+error_mode: absolute
 error_factor: 10.0
-error_tolerance: 1.0
+error_tolerance: 0.4
 bound_mode: horizon_conformal
 
 # Conformal
@@ -94,7 +98,7 @@ block_quantile: 0.9
 coverage_guard_quantile: 0.80
 coverage_guard_margin: 0.02
 coverage_guard_min_scale: 0.25
-debias_scale: 0.4
+debias_scale: 0.0  # ablation 2026-07-05: debias cost 0.5-0.7 pt coverage for <=0.009 tightness on corrected labels
 debias_quantile: 0.95
 offset_calibration: false
 offset_quantile: null
@@ -108,13 +112,13 @@ expansion_lag: null
 expansion_horizon: 10
 calibrate_coverage: false
 calibration_alpha: 0.05
-calibration_floor: 1.0
+calibration_floor: 0.0
 
-# Lyapunov
-lyap_max_t: 25
-lyap_theiler: 10
-lyap_fit_start: 1
-lyap_fit_end: 10
+# Lyapunov (null = auto)
+lyap_max_t: null
+lyap_theiler: null
+lyap_fit_start: null
+lyap_fit_end: null
 lyap_dim: null
 lyap_lag: null
 
@@ -128,7 +132,7 @@ progress: true
 # Physics
 r: 4.0
 x0: 0.2
-dt: 0.01
+dt: null  # per-system default (see DEFAULT_DT in src/horizon_cli.py)
 integrator: rk4
 sigma: 10.0
 rho: 28.0
@@ -136,7 +140,7 @@ beta: 2.6666666666666665
 a: 0.2
 b: 0.2
 c: 5.7
-tau: 17
+tau: 17.0  # Mackey-Glass delay in TIME units
 mg_beta: 0.2
 gamma: 0.1
 n: 10

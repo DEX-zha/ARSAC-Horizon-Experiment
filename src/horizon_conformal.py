@@ -107,19 +107,49 @@ class ConformalTreeEstimator:
         self.global_fallback = 0.0
 
     def fit(self, X, y, alpha, rng=None, tie_jitter=0.0):
-        """Fit the tree and compute quantiles in each leaf."""
-        self.tree.fit(X, y)
-        leaf_ids = self.tree.apply(X)
-        unique_leaves = np.unique(leaf_ids)
-        
-        self.global_fallback = conformal_quantile(y, alpha, rng=rng, tie_jitter=tie_jitter)
+        """Fit the tree and compute quantiles in each leaf.
 
-        for leaf in unique_leaves:
-            mask = leaf_ids == leaf
-            leaf_y = y[mask]
-            self.leaf_quantiles[leaf] = conformal_quantile(
-                leaf_y, alpha, rng=rng, tie_jitter=tie_jitter
-            )
+        Growing the tree AND computing leaf quantiles on the same data is
+        double dipping and voids the conformal guarantee (audit E3). We use a
+        temporal split: the tree structure is learned on the first half, the
+        leaf quantiles are computed on the held-out second half.
+        """
+        n = len(y)
+        if n < 4 * self.tree.min_samples_leaf:
+            # Small-data fallback: not enough samples for a temporal split,
+            # keep the historical single-set behavior (no conformal guarantee).
+            self.tree.fit(X, y)
+            leaf_ids = self.tree.apply(X)
+            unique_leaves = np.unique(leaf_ids)
+
+            self.global_fallback = conformal_quantile(y, alpha, rng=rng, tie_jitter=tie_jitter)
+
+            for leaf in unique_leaves:
+                mask = leaf_ids == leaf
+                leaf_y = y[mask]
+                self.leaf_quantiles[leaf] = conformal_quantile(
+                    leaf_y, alpha, rng=rng, tie_jitter=tie_jitter
+                )
+            return
+
+        half = n // 2
+        # Tree structure on the first (temporal) half only.
+        self.tree.fit(X[:half], y[:half])
+        y_quant = y[half:]
+        self.global_fallback = conformal_quantile(
+            y_quant, alpha, rng=rng, tie_jitter=tie_jitter
+        )
+        # Leaf quantiles from the second half only (held out from tree growth).
+        leaf_ids = self.tree.apply(X[half:])
+        for leaf in np.unique(leaf_ids):
+            leaf_y = y_quant[leaf_ids == leaf]
+            if leaf_y.size < 5:
+                # Too few held-out samples in this leaf: use the global fallback.
+                self.leaf_quantiles[leaf] = self.global_fallback
+            else:
+                self.leaf_quantiles[leaf] = conformal_quantile(
+                    leaf_y, alpha, rng=rng, tie_jitter=tie_jitter
+                )
 
     def predict(self, X):
         """Predict calibrated constants for each sample."""

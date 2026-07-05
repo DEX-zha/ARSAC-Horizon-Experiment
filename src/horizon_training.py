@@ -1,12 +1,37 @@
 """Training utilities for horizon experiments."""
 
+from contextlib import contextmanager
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from src.horizon_censoring import censored_pinball_loss
 from src.horizon_models import LSTMPredictor, MLPPredictor
 from src.horizon_progress import ProgressBar
+
+# Default right-censoring cap for train_quantile_mlp. Callers that cannot
+# pass cap= explicitly (e.g. predict_quantile_ensemble in horizon_conformal)
+# inherit this value; None keeps the exact historical pinball behavior.
+_DEFAULT_QUANTILE_CAP = None
+
+
+@contextmanager
+def quantile_cap(cap):
+    """Context manager setting the default censoring cap for train_quantile_mlp.
+
+    Used by the conformal pipeline to thread cap=horizon_max through the
+    quantile-model calls without changing intermediate call signatures.
+    ``quantile_cap(None)`` is a no-op (plain pinball loss).
+    """
+    global _DEFAULT_QUANTILE_CAP
+    previous = _DEFAULT_QUANTILE_CAP
+    _DEFAULT_QUANTILE_CAP = cap
+    try:
+        yield
+    finally:
+        _DEFAULT_QUANTILE_CAP = previous
 
 
 def build_multistep_supervised(series, dim, lag, horizon):
@@ -149,8 +174,18 @@ def train_quantile_mlp(
     patience=10,
     device="cpu",
     show_progress=False,
+    cap=None,
 ):
-    """Trains an MLP for quantile regression with early stopping."""
+    """Trains an MLP for quantile regression with early stopping.
+
+    ``cap`` is an optional right-censoring point (Powell 1986): labels with
+    ``y == cap`` mean ``y >= cap``, so the loss uses ``min(pred, cap)`` and
+    stops penalizing predictions above the cap. ``cap=None`` (default)
+    reproduces the plain pinball loss exactly; when None, the module-level
+    default set via :func:`quantile_cap` applies.
+    """
+    if cap is None:
+        cap = _DEFAULT_QUANTILE_CAP
     if x_val.size == 0 or y_val.size == 0:
         x_val = x_train
         y_val = y_train
@@ -180,14 +215,14 @@ def train_quantile_mlp(
             yb = yb.to(device)
             optimizer.zero_grad()
             pred = model(xb)
-            loss = pinball_loss(pred, yb, quantile)
+            loss = censored_pinball_loss(pred, yb, quantile, cap)
             loss.backward()
             optimizer.step()
 
         model.eval()
         with torch.no_grad():
             val_pred = model(x_val_t)
-            val_loss = pinball_loss(val_pred, y_val_t, quantile).item()
+            val_loss = censored_pinball_loss(val_pred, y_val_t, quantile, cap).item()
 
         if val_loss < best_val:
             best_val = val_loss

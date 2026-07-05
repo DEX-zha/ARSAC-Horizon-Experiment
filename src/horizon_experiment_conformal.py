@@ -26,6 +26,12 @@ def _run_conformal(ctx, base, lyap, stats, dt):
         model = _calibrate_conformal(ctx, sets, preds, use_sigma, ctx.constants, stats)
     pred_test_cal, leaf_ids = _test_conformal(ctx, sets, preds, model, use_sigma, ctx.constants, stats)
     _extra_conformal_stats(pred_test_cal, leaf_ids, sets, ctx.constants, stats, ctx.best, ctx.args)
+    if getattr(ctx.args, "export_bounds", False):
+        # Opt-in per-window export for the HorizonEstimator API. These keys
+        # are not in CSV_HEADER, so the CSV writer ignores them; they travel
+        # through the run_experiment return dict.
+        stats["l_test_values"] = [float(v) for v in pred_test_cal]
+        stats["h_test_values"] = [float(v) for v in sets.y_test]
     return _finalize_conformal(stats, dt, ctx.args)
 
 

@@ -7,18 +7,18 @@ import numpy as np
 
 from src.horizon_experiment_core import _clip_horizon, _const, _horizon_time
 from src.horizon_plots import plot_predictability_map
+from src.horizon_experiment_conformal_calibration import _censored_pred, _conformal_c_test, _score_quantiles
 
 
 def _saturation_rate(values, horizon_max, eps=1e-9):
     if not values.size:
         return None
     return float(np.mean(values >= (float(horizon_max) - eps)))
-from src.horizon_experiment_conformal_calibration import _conformal_c_test, _score_quantiles
 
 
 def _test_predictions(pred_test, c_test, sigma_test, use_sigma, args, constants):
     sigma_term = sigma_test if use_sigma else np.ones_like(pred_test)
-    return _clip_horizon(pred_test - c_test * sigma_term, args, constants)
+    return _clip_horizon(_censored_pred(pred_test, args) - c_test * sigma_term, args, constants)
 
 
 
@@ -118,6 +118,9 @@ def _test_conformal(ctx, sets, preds, model, use_sigma, constants, stats):
     stats["horizon_model_cal"] = h_cal
     stats["horizon_window_median"], stats["horizon_window_mean"] = _window_stats(sets.y_test)
     coverage, tightness, slack_med, slack_p90 = _coverage_stats(sets.y_test, pred_test_cal, constants)
+    if sets.y_test.size and pred_test_cal.size:
+        stats["coverage_hits"] = int(np.sum(sets.y_test >= pred_test_cal))
+        stats["test_samples"] = int(sets.y_test.size)
     stats["coverage_test"] = coverage
     stats["tightness_ratio"] = tightness
     stats["slack_median"] = slack_med
@@ -135,6 +138,12 @@ def _test_conformal(ctx, sets, preds, model, use_sigma, constants, stats):
             f"{ctx.args.plot_prefix}_predictability_seed{ctx.args.seed}.png",
         )
         plot_predictability_map(pred_test_cal, jac, resid, out_path)
+    # Full 0/1 hit series (audit E4): overlapping windows make hits serially
+    # dependent, so downstream lower bounds need the series, not just the sum.
+    if sets.y_test.size and pred_test_cal.size:
+        stats["coverage_hit_series"] = (sets.y_test >= pred_test_cal).astype(int).tolist()
+    else:
+        stats["coverage_hit_series"] = None
     return pred_test_cal, leaf_ids
 
 

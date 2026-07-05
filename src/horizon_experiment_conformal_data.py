@@ -11,6 +11,7 @@ from src.horizon_conformal import (
     predict_sigma_quantile_ensemble,
 )
 from src.horizon_metrics import build_horizon_dataset
+from src.horizon_training import quantile_cap
 from src.horizon_experiment_core import (
     HorizonSets,
     Predictions,
@@ -19,6 +20,13 @@ from src.horizon_experiment_core import (
     _seed_offset,
     _seed_with_base,
 )
+
+
+def _censoring_cap(args):
+    """Right-censoring cap for quantile training: horizon_max when enabled."""
+    if getattr(args, "censored_quantile", False):
+        return float(args.horizon_max)
+    return None
 
 
 def _horizon_dataset(args, model, series, best, seed, stride):
@@ -109,9 +117,23 @@ def _predict_sigma(x_train, y_train, x_val, y_val, x_target, args, device, seed)
 
 
 def _cv_dataset(ctx, calib_series):
-    cv_series = np.concatenate([ctx.data.train_std, calib_series], axis=0)
+    """Build the CV pool from train and calib segments separately.
+
+    The val segment sits between train and calib in real time, so concatenating
+    the raw series would create a temporal discontinuity: windows spanning the
+    junction would be fictitious trajectories. Instead the horizon dataset is
+    built on each segment and the results are concatenated. Limitation: the
+    train-segment windows are in-sample for the forecaster (trained on
+    train+val), so their labels are optimistic; a full fix is deferred to V2.
+    """
     seed = _seed_offset(ctx.args.seed, ctx.constants, "cv")
-    return _horizon_dataset(ctx.args, ctx.model, cv_series, ctx.best, seed, ctx.args.horizon_calib_thin)
+    x_a, y_a = _horizon_dataset(ctx.args, ctx.model, ctx.data.train_std, ctx.best, seed, ctx.args.horizon_calib_thin)
+    x_b, y_b = _horizon_dataset(ctx.args, ctx.model, calib_series, ctx.best, seed + 1, ctx.args.horizon_calib_thin)
+    if x_a.size == 0:
+        return x_b, y_b
+    if x_b.size == 0:
+        return x_a, y_a
+    return np.concatenate([x_a, x_b], axis=0), np.concatenate([y_a, y_b], axis=0)
 
 
 
@@ -248,9 +270,12 @@ def _apply_offset_calibration(preds, y_calib, use_sigma, args):
 
 
 def _conformal_predictions(ctx, sets, calib_series, quantile, use_sigma, constants, feat_mean, feat_std):
-    preds, cv_used = _try_cv_predictions(ctx, sets, calib_series, quantile, use_sigma, constants, feat_mean, feat_std)
-    if not cv_used:
-        preds = _direct_predictions(sets, quantile, use_sigma, ctx.args, ctx.device, constants, ctx.args.seed)
+    # Powell censored pinball (audit C3): thread cap=horizon_max into every
+    # quantile-model training below when --censored-quantile is on.
+    with quantile_cap(_censoring_cap(ctx.args)):
+        preds, cv_used = _try_cv_predictions(ctx, sets, calib_series, quantile, use_sigma, constants, feat_mean, feat_std)
+        if not cv_used:
+            preds = _direct_predictions(sets, quantile, use_sigma, ctx.args, ctx.device, constants, ctx.args.seed)
     preds = _apply_sigma_bounds_to_predictions(preds, ctx.args)
     preds = _apply_offset_calibration(preds, sets.y_calib, use_sigma, ctx.args)
     return preds

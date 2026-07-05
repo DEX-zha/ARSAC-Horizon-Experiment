@@ -66,6 +66,9 @@ CSV_HEADER = [
     "calibration_coverage",
     "horizon_model_cal",
     "horizon_model_cal_time",
+    "horizon_certified",
+    "lipschitz_G",
+    "delta_sup",
 ]
 
 
@@ -120,6 +123,8 @@ def _csv_row_part_c(args, exp_dim, exp_lag, stats):
         args.bound_mode, f"{args.calibration_alpha:.3f}", f"{args.calibration_floor:.3f}", f"{stats['scale']:.6f}",
         stats["calibration_samples"], _fmt_optional(stats["coverage"], 3),
         _fmt_inf(stats["horizon_model_cal"], 3), _fmt_inf(stats["horizon_model_cal_time"], 3),
+        _fmt_inf(stats.get("horizon_certified", 0.0), 3), f"{stats.get('lipschitz_G', 0.0):.6f}",
+        f"{stats.get('delta_sup', 0.0):.6f}",
     ]
 
 
@@ -288,6 +293,8 @@ def _build_return(best, base, lyap, stats, args, exp_dim, exp_lag):
     result = _return_metrics(best, base, lyap)
     result.update(_return_args(args, exp_dim, exp_lag, selection_horizon))
     result.update(_return_from_stats(stats, base))
+    if getattr(args, "return_embed_search", False):
+        result["embed_search"] = best.get("search_history")
     return result
 
 
