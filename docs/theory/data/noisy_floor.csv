@@ -1,0 +1,4 @@
+sigma,sigma_hat,sigma_ratio,C1_pass,floor_med_steps,law_steps,law_ratio,C2_pass,H_model_med,rho_noisy,bound_ok,saturation
+0.001,1.8421e-03,1.842,1,656,661,0.991,1,584,0.9670,1,TOUCHED
+0.01,1.8380e-02,1.838,1,370,407,0.910,1,254,0.7871,1,NEAR
+0.03,4.7789e-02,1.593,1,251,286,0.878,1,147,0.6328,1,NEAR

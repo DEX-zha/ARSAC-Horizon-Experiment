@@ -138,7 +138,42 @@ class HorizonEstimator:
         self.horizon_certified_ = self.result_.get("horizon_certified")
         self.label_identified_ = self.result_.get("label_identified", True)
         self._compute_r_diagnostic()
+        self._compute_noise_floor(args.custom_series, args.train_ratio)
         return self
+
+    def _compute_noise_floor(self, raw, train_ratio):
+        """Noise-aware reachable floor: separates noise from model deficit.
+
+        sigma_obs is estimated by local-linear residuals (src/horizon_noise,
+        validated on known synthetic noise); the reachable horizon under that
+        noise follows the one-shot floor law H = ln(tau/sigma)/(lambda*dt)
+        validated by paired twins (docs/theory/chaos_floor.md). margin_real_
+        = H_reachable / median(H_w): how much horizon a PERFECT model of the
+        dynamics could still add given the noise in YOUR data.
+        """
+        from src.horizon_noise import estimate_observation_noise, reachable_horizon_steps
+
+        self.sigma_obs_ = None
+        self.h_reachable_ = None
+        self.margin_real_ = None
+        try:
+            raw = np.asarray(raw, dtype=np.float64).reshape(-1)
+            i_train = max(100, int(train_ratio * raw.size))
+            mean, sd = raw[:i_train].mean(), raw[:i_train].std()
+            if sd <= 0:
+                return
+            sig_hat, _ = estimate_observation_noise((raw - mean) / sd, dim=6, lag=1, seed=0)
+            lam_step = self.result_.get("lyapunov_step")
+            if not np.isfinite(sig_hat):
+                return
+            self.sigma_obs_ = float(sig_hat)
+            h_reach = reachable_horizon_steps(self.tolerance, sig_hat, lam_step)
+            self.h_reachable_ = float(min(h_reach, 50 * self.horizon_max_))
+            h_med = self.result_.get("horizon_real_window_median")
+            if h_med and h_med > 0 and np.isfinite(h_reach):
+                self.margin_real_ = float(h_reach / h_med)
+        except Exception:  # diagnostic must never break a fit
+            return
 
     def _compute_r_diagnostic(self):
         """R = Lambda_eff/lambda_1: distance of the model to the chaos floor.
@@ -186,14 +221,30 @@ class HorizonEstimator:
             "embedding": (r.get("dim"), r.get("lag")),
             "R_distance_to_chaos_floor": self.R_median_,
             "chaos_limited": self.chaos_limited_,
-            "R_reading": (
-                None if self.R_median_ is None else
-                ("model at the physical predictability floor: a better model "
-                 "cannot buy more horizon; invest in better measurements/state "
-                 "estimation" if self.chaos_limited_ else
-                 f"horizon is model-limited (error grows ~{self.R_median_:.1f}x "
-                 "faster than the chaos floor): improving the model can extend "
-                 "the horizon")
-            ),
+            "sigma_obs_std_units": self.sigma_obs_,
+            "H_reachable_given_noise": self.h_reachable_,
+            "margin_real": self.margin_real_,
+            "R_reading": self._reading(),
             "guarantee_level": "empirical (see docs/THEORY.md section 2c)",
         }
+
+    def _reading(self):
+        """One actionable sentence combining R and the noise-aware margin."""
+        if self.R_median_ is None:
+            return None
+        if self.chaos_limited_:
+            return ("model at the physical predictability floor: a better model "
+                    "cannot buy more horizon; invest in better measurements/state "
+                    "estimation")
+        base = (f"horizon is model-limited (error grows ~{self.R_median_:.1f}x "
+                "faster than the deterministic chaos floor)")
+        if self.margin_real_ is None:
+            return base + "; improving the model can extend the horizon"
+        if self.margin_real_ < 1.5:
+            return (base + f"; BUT the estimated observation noise "
+                    f"(sigma~{self.sigma_obs_:.2g} std) caps the reachable horizon "
+                    f"at ~{self.margin_real_:.1f}x the current one: the margin is "
+                    "mostly noise, not model deficit")
+        return (base + f"; accounting for the estimated noise "
+                f"(sigma~{self.sigma_obs_:.2g} std), a better model could still "
+                f"reach ~{self.margin_real_:.1f}x the current horizon")

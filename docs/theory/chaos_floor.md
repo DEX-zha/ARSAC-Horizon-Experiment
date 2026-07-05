@@ -104,3 +104,33 @@ e₀→0, ce que la progression degré 3→6 vérifie (ρ : 0.49 → 0.68 → 0.
 3. Observable-only : état reconstruit (retards + carte inverse apprise) → R ?
 4. Dériver le facteur géométrique O(1) de la loi d'injection (projection
    isotrope → direction instable + transitoire d'alignement).
+
+---
+
+## 6. Extension au bruit d'observation : le plancher atteignable (2026-07-05, suite)
+
+Étude `studies/study_noisy_floor.py` (CSV : `outputs/noisy_floor.csv`,
+copie : `docs/theory/data/noisy_floor.csv`). Trois affirmations pré-enregistrées,
+testées sur Lorenz à bruit synthétique CONNU σ ∈ {1e-3, 1e-2, 3e-2} std :
+
+| σ | C1 : σ̂/σ ∈ [0.5, 2] | C2 : plancher/loi ∈ [0.8, 1.3] | C3 : ρ_noisy (borne OK) |
+|---|---|---|---|
+| 1e-3 | 1.84 ✓ | 0.99 ✓ | 0.967 → TOUCHÉ |
+| 1e-2 | 1.84 ✓ | 0.91 ✓ | 0.787 → NEAR |
+| 3e-2 | 1.59 ✓ | 0.88 ✓ | 0.633 → NEAR |
+
+Conséquences :
+1. **La loi one-shot se transporte au bruit** : le plancher atteignable sous
+   bruit d'observation σ est H_reach ≈ ln(τ/σ)/(λ₁·dt), vérifié à 12 % près.
+   C'est le pont qui rend le diagnostic honnête sur données réelles, où les
+   jumeaux sont impossibles (pas de vraie dynamique disponible).
+2. **σ̂ par résidus localement linéaires** (src/horizon_noise.py) est étalonné :
+   surestimation systématique ×1.6–1.8 (biais de courbure, robuste MAD) — une
+   borne supérieure, donc H_reach estimé conservativement (dans le bon sens).
+3. **Décomposition produit** (HorizonEstimator.report) : `margin_real` =
+   H_reach/H_médian sépare la marge d'amélioration réelle du modèle de la part
+   irréductible due au bruit — la réponse chiffrée à « vaut-il la peine
+   d'améliorer mon modèle ? » sur données réelles.
+Limites : estimateur σ̂ biaisé vers le haut (facteur ~1.7 mesuré sur Lorenz —
+non recalibré volontairement, à revalider sur d'autres systèmes) ; λ₁ estimé
+par Rosenstein sur données réelles a sa propre incertitude, non propagée.

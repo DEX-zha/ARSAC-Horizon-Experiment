@@ -45,6 +45,10 @@ def show(name, est):
     print(f"  labels identifiables   : {rep['label_identified']} (p_sat={rep['p_sat_test']:.2f})")
     r = rep["R_distance_to_chaos_floor"]
     print(f"  R (distance au plancher): {r if r is None else f'{r:.1f}'}")
+    s = rep["sigma_obs_std_units"]
+    print(f"  bruit d'observation (est.): {s if s is None else f'{s:.3f} std'}")
+    m = rep["margin_real"]
+    print(f"  marge REELLE (bruit)   : {m if m is None else f'x{m:.1f}'}")
     print(f"  lecture                : {rep['R_reading']}")
 
 
