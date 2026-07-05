@@ -79,6 +79,26 @@ def test_byo_requires_dim():
         est.fit(_user_series())
 
 
+def test_quasiperiodic_signal_disables_R_diagnostic():
+    # Regime guard (added after the BIDMC biosignal test): on a strongly
+    # recurrent signal lambda_1 -> 0 and R would blow up mechanically, so it
+    # must be suppressed and flagged, while L(x) stays valid.
+    t = np.linspace(0, 200 * np.pi, 4000)
+    series = np.sin(t) + 0.3 * np.sin(2.3 * t) + 0.02 * np.random.default_rng(0).normal(size=t.size)
+    est = HorizonEstimator(
+        model="linear", alpha=0.1, tolerance=0.4, horizon_max=20,
+        quantile_ensemble=1, mlp_epochs=5, output_dir="outputs_estimator_test",
+    )
+    est.fit(series)
+    rep = est.report()
+    assert rep["regime"] in ("quasi-periodic", "non-chaotic")
+    assert rep["R_distance_to_chaos_floor"] is None  # suppressed, not a huge artifact
+    assert rep["margin_real"] is None
+    assert est.lower_bounds_.size > 0  # the calibrated bound is still produced
+    assert "does NOT" in rep["R_reading"] or "do not apply" in rep["R_reading"]
+    assert "L(x)" in rep["R_reading"]  # the bound stays offered in every regime
+
+
 def test_report_before_fit_raises():
     with pytest.raises(RuntimeError):
         HorizonEstimator().report()

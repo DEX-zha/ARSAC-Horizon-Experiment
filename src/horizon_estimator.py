@@ -137,9 +137,35 @@ class HorizonEstimator:
         self.tightness_ = self.result_.get("tightness_ratio")
         self.horizon_certified_ = self.result_.get("horizon_certified")
         self.label_identified_ = self.result_.get("label_identified", True)
+        self._profile(args.custom_series)
         self._compute_r_diagnostic()
         self._compute_noise_floor(args.custom_series, args.train_ratio)
         return self
+
+    def _profile(self, raw):
+        """Predictability-regime classification (src/horizon_profile.py).
+
+        Entry gate for every chaos diagnostic: R and margin_real are only
+        reported in the 'chaotic' regime where they were validated. Reuses
+        the pipeline's Lyapunov estimate and theory embedding for coherence.
+        """
+        from src.horizon_profile import profile_series
+
+        self.profile_ = None
+        self.periodicity_ = None
+        self.regime_ = "undetermined"
+        try:
+            emb = None
+            d, lg = self.result_.get("lyapunov_dim"), self.result_.get("lyapunov_lag")
+            if d and lg:
+                emb = (int(d), int(lg))
+            self.profile_ = profile_series(
+                raw, lam_step=self.result_.get("lyapunov_step"), embedding=emb
+            )
+            self.periodicity_ = self.profile_.periodicity_index
+            self.regime_ = self.profile_.regime
+        except Exception:  # diagnostics must never break a fit
+            return
 
     def _compute_noise_floor(self, raw, train_ratio):
         """Noise-aware reachable floor: separates noise from model deficit.
@@ -167,6 +193,10 @@ class HorizonEstimator:
             if not np.isfinite(sig_hat):
                 return
             self.sigma_obs_ = float(sig_hat)
+            # margin_real uses the chaos floor law (divides by lambda), so it
+            # is only valid in the chaotic regime -- same guard as R.
+            if getattr(self, "regime_", "chaotic") != "chaotic":
+                return
             h_reach = reachable_horizon_steps(self.tolerance, sig_hat, lam_step)
             self.h_reachable_ = float(min(h_reach, 50 * self.horizon_max_))
             h_med = self.result_.get("horizon_real_window_median")
@@ -183,9 +213,19 @@ class HorizonEstimator:
         the system's physical predictability (improving the model cannot buy
         more horizon); R >> 1 means the horizon is model-limited (improving
         the model CAN buy ~x(R) more horizon, logarithmically in precision).
+
+        Regime guard (added after the BIDMC biosignal test, studies/demo_bidmc):
+        R divides by lambda_1, so it is only meaningful when lambda_1 is a
+        resolved, positive expansion rate. On quasi-periodic signals (heartbeat,
+        many sensors) lambda_1 -> 0 and R blows up mechanically -- a division
+        artifact, NOT evidence that a better model buys x(R) horizon. When the
+        series is strongly recurrent or lambda is below resolution, R is set to
+        None and self.regime_ = 'quasi-periodic' / 'non-chaotic'.
         """
         self.R_median_ = None
         self.chaos_limited_ = None
+        if getattr(self, "regime_", None) != "chaotic":
+            return  # R was validated on chaotic attractors only (profiler gate)
         e0 = np.asarray(self.result_.get("e0_test_values") or [], dtype=np.float64)
         lam_step = self.result_.get("lyapunov_step")
         if not e0.size or e0.size != self.test_horizons_.size or not lam_step or lam_step <= 0:
@@ -219,6 +259,8 @@ class HorizonEstimator:
             "horizon_certified": self.horizon_certified_,
             "lyapunov_per_step": r.get("lyapunov_step"),
             "embedding": (r.get("dim"), r.get("lag")),
+            "regime": getattr(self, "regime_", None),
+            "periodicity_index": self.periodicity_,
             "R_distance_to_chaos_floor": self.R_median_,
             "chaos_limited": self.chaos_limited_,
             "sigma_obs_std_units": self.sigma_obs_,
@@ -229,7 +271,14 @@ class HorizonEstimator:
         }
 
     def _reading(self):
-        """One actionable sentence combining R and the noise-aware margin."""
+        """One actionable sentence combining the regime, R and the noise margin."""
+        regime = getattr(self, "regime_", "chaotic")
+        if regime != "chaotic":
+            if self.profile_ is not None:
+                return (self.profile_.reading
+                        + ". The calibrated bound L(x) remains valid in every regime")
+            return ("regime undetermined: chaos diagnostics withheld; "
+                    "the calibrated bound L(x) remains valid")
         if self.R_median_ is None:
             return None
         if self.chaos_limited_:

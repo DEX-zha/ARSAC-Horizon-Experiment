@@ -16,12 +16,13 @@
 
 ---
 
-ARSAC Horizon takes **your time series** and **your forecaster** and answers the three
-questions every practitioner actually has:
+ARSAC Horizon takes **your time series** and **your forecaster** and answers the
+questions every practitioner actually has — starting with the one everyone skips:
 
 | Question | Answer | How it's backed |
 |---|---|---|
-| 🎯 *How far ahead can I trust this forecast?* | A calibrated lower bound **L(x)** per window, `P(H ≥ L) ≥ 1−α` | Conformal calibration, coverage **measured** on held-out windows |
+| 🧭 *What KIND of unpredictability do I have?* | A **predictability regime**: `chaotic` / `quasi-periodic` / `stochastic` / `regular` — routing every other diagnostic | Regime classifier pinned on canonical cases; born from a real ICU-biosignal failure (see below) |
+| 🎯 *How far ahead can I trust this forecast?* | A calibrated lower bound **L(x)** per window, `P(H ≥ L) ≥ 1−α` — valid in **every** regime | Conformal calibration, coverage **measured** on held-out windows |
 | 📈 *Is it worth improving my model?* | **R = Λ_eff/λ₁**, your measured distance to the physical predictability floor | Validated against ground-truth paired twins ([the chaos-floor study](docs/theory/chaos_floor.md)) |
 | 🔊 *…or is it just noise?* | **margin_real**: the reachable margin once estimated observation noise is deducted | Noise-transported floor law, verified on known synthetic noise |
 
@@ -31,8 +32,41 @@ measurements into a per-window lower bound **L(x)** that is wrong at most a chos
 fraction α of the time. **R** and **margin_real** then tell you *why* the horizon
 stops where it does — model error, chaos itself, or measurement noise.
 
-To our knowledge, no other packaged tool answers the second and third questions
+To our knowledge, no other packaged tool answers the last two questions
 with a **calibrated instrument**.
+
+## 🧭 Start here: the predictability profiler
+
+Most tools assume your series is one kind of thing. ARSAC first *measures* what it
+is, then only reports the diagnostics that are valid there — because an instrument
+that fires outside its regime produces confident nonsense. One call:
+
+```python
+from src.horizon_profile import profile_series
+print(profile_series(my_series).summary())
+```
+
+Live output of `python studies/demo_profiler.py` on six signals of different nature:
+
+| signal | regime | periodicity | λ/step | noise | structure |
+|---|---|---|---|---|---|
+| white noise | **stochastic** | 0.04 | — | 1.05 | 0.74 |
+| random walk | **regular** | 0.00 | (diffusive, gated) | 0.04 | 1.21 |
+| sine + noise | **quasi-periodic** | 0.99 | — | 0.09 | 0.50 |
+| logistic map | **chaotic** | 0.04 | **0.691** (ln 2 = 0.693) | 0.00 | 0.00 |
+| Lorenz | **chaotic** | 0.09 | **0.0088** (lit. 0.0091) | 0.00 | 0.00 |
+| ICU pulse (PPG, BIDMC) | **quasi-periodic** | 0.85 | — | 0.04 | 0.22 |
+
+Routing: `chaotic` → full instrument (L, R, margin_real) · `quasi-periodic`/`regular`
+→ L(x), chaos diagnostics withheld with an explanation · `stochastic` → "no model
+will forecast far; invest in better data".
+
+**Why this exists**: our first run on a real ICU biosignal produced R = 196 — a
+division-by-λ artifact on a quasi-periodic signal, confidently wrong. We turned
+that failure into the product's entry gate: the classifier is pinned by tests on
+all six cases above (including the random walk, which fools naive Lyapunov
+estimators with diffusive divergence — caught by a structure-beyond-persistence
+test). An instrument that knows when it doesn't apply is the whole point.
 
 <div align="center">
 <img src="assets/predictability_map.png" alt="Predictability map: calibrated lower bound L(x_t) along one trajectory" width="760"/>
