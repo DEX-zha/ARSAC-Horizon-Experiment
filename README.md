@@ -10,7 +10,7 @@
 cycles, or chaos — how far your forecasts can be trusted, and whether a better model
 can do better. Measured, calibrated, on your data.**
 
-[![tests](https://img.shields.io/badge/tests-231%20passing-brightgreen?style=flat-square)](tests/)
+[![tests](https://img.shields.io/badge/tests-235%20passing-brightgreen?style=flat-square)](tests/)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)](pyproject.toml)
 [![theory](https://img.shields.io/badge/theory-docs%2FTHEORY.md-8A2BE2?style=flat-square)](docs/THEORY.md)
@@ -29,6 +29,15 @@ rather than assumes.
 
 ## Headline results
 
+- **The theory was validated on industrial data it had never seen — 17/17
+  pre-registered checks.** On two independent power grids (AEP + PJM-East, the
+  latter fetched from the internet during the test), the scaling law derived
+  from our error-accumulation framework fits the measured horizon curve H(τ)
+  at **R² = 0.99** with its scale predicted by an independent noise estimate
+  (**agreement 0.88× / 1.10×**), the chaotic signature is rejected as predicted,
+  and the coverage guarantee held **6/6** with serial-dependence-aware bootstrap
+  lower bounds — using a remedy fixed before seeing any grid data.
+  [`docs/theory/industrial_validation.md`](docs/theory/industrial_validation.md)
 - **A learned forecaster was driven to the physical predictability floor of the
   Lorenz system and this was proven, not claimed** — paired-twin protocol against
   the true perturbed dynamics, pre-registered criteria, replicated on two seeds:
@@ -169,6 +178,31 @@ the naive rule is temporarily excellent (highly regular days), information a
 global metric erases. The per-window signal is verified, not decorative:
 Spearman(L, realized horizon) = 0.44, asserted by the generating script
 (`studies/make_energy_figure.py`) before the figure can be saved.
+
+### Industrial validation: the theory predicted, two real grids confirmed
+
+<div align="center">
+<img src="assets/industrial_validation.png" alt="Industrial validation: scaling law on two grids and 6/6 coverage guarantee" width="880"/>
+</div>
+
+A pre-registered protocol (`studies/study_industrial_validation.py` — every
+threshold written in the script before any run) tested four claims on two
+independent balancing regions, one of which (PJM-East) was fetched from the
+internet during the test. **Left**: our error-accumulation framework, in its
+λ→0 limit, predicts `H(τ) = (τ/σ_eff)^s` for stable dynamics — measured at
+**R² = 0.992–0.993** on both grids, with the competing chaotic signature
+(`H ∝ ln τ`, the law we validated on Lorenz) clearly rejected, and the fitted
+scale σ_eff matching the **independently measured** noise level to 12% and
+10%. A law derived on a simulated attractor, with its scale predicted by a
+separate instrument, describing real infrastructure data. **Right**: the
+coverage guarantee `P(H ≥ L) ≥ 0.90` held on all six calibrations (two grids ×
+two model families × two periods), with block-bootstrap lower bounds that
+account for serial dependence — using the α-margin remedy fixed on Lorenz
+before touching any grid data. **17/17 pre-registered checks passed**; the
+evidence CSV is versioned, the figure re-derives and re-asserts every check
+before it will render, and `tests/test_industrial_evidence.py` pins all of it
+to the test suite. Full derivation and tables:
+[`docs/theory/industrial_validation.md`](docs/theory/industrial_validation.md).
 
 ## The chaos floor: what R is calibrated against
 
