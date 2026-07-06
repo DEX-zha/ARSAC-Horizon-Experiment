@@ -16,3 +16,6 @@ paper.bbl
 paper.blg
 paper.log
 paper.out
+data/COMED_hourly.csv
+data/DOM_hourly.csv
+data/Metro_Interstate_Traffic_Volume.csv
