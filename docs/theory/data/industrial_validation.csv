@@ -1,0 +1,11 @@
+kind,payload
+v1_aep,"{'regime': 'quasi-periodic', 'periodicity': 0.618, 'lam': 0.00156, 'resolved': False, 'noise': 0.0911}"
+v1_pjme,"{'regime': 'quasi-periodic', 'periodicity': 0.734, 'lam': 0.00103, 'resolved': False, 'noise': 0.0458}"
+v3_aep,"{'slope': 1.395, 'r2_pow': 0.9927, 'r2_log': 0.3497, 'sigma_eff': 0.0584, 'sigma_hat': 0.0663, 'ratio': 0.881, 'h_med': {0.2: 6.0, 0.3: 9.0, 0.4: 14.0, 0.6: 27.0, 0.8: 39.0}}"
+v3_pjme,"{'slope': 1.26, 'r2_pow': 0.992, 'r2_log': 0.6178, 'sigma_eff': 0.0493, 'sigma_hat': 0.045, 'ratio': 1.096, 'h_med': {0.2: 6.0, 0.3: 10.0, 0.4: 13.0, 0.6: 22.0, 0.8: 36.0}}"
+v24_aep_p1_linear,"{'coverage': 0.9279, 'boot_lb': 0.9129, 'L_med': 5.76, 'H_med': 13.0, 'spearman': 0.374, 'n': 1206}"
+v24_aep_p1_naive,"{'coverage': 0.9408, 'boot_lb': 0.9211, 'L_med': 1.03, 'H_med': 2.0, 'spearman': 0.823, 'n': 1217}"
+v24_aep_p2_linear,"{'coverage': 0.9265, 'boot_lb': 0.9116, 'L_med': 5.6, 'H_med': 11.0, 'spearman': 0.423, 'n': 1211}"
+v24_aep_p2_naive,"{'coverage': 0.9228, 'boot_lb': 0.8998, 'L_med': 2.43, 'H_med': 7.0, 'spearman': 0.732, 'n': 1217}"
+v24_pjme_pfull_linear,"{'coverage': 0.9062, 'boot_lb': 0.8968, 'L_med': 4.41, 'H_med': 5.0, 'spearman': 0.776, 'n': 2548}"
+v24_pjme_pfull_naive,"{'coverage': 0.9226, 'boot_lb': 0.9056, 'L_med': 2.15, 'H_med': 5.0, 'spearman': 0.825, 'n': 2531}"
