@@ -10,7 +10,7 @@
 cycles, or chaos — how far your forecasts can be trusted, and whether a better model
 can do better. Measured, calibrated, on your data.**
 
-[![tests](https://img.shields.io/badge/tests-235%20passing-brightgreen?style=flat-square)](tests/)
+[![tests](https://img.shields.io/badge/tests-239%20passing-brightgreen?style=flat-square)](tests/)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)](pyproject.toml)
 [![theory](https://img.shields.io/badge/theory-docs%2FTHEORY.md-8A2BE2?style=flat-square)](docs/THEORY.md)
@@ -29,6 +29,21 @@ rather than assumes.
 
 ## Headline results
 
+- **The validation now spans 5 datasets × 4 model families × 2 domains —
+  42/43 pre-registered checks across two campaigns.** Campaign v2 added two
+  untouched grids (COMED, DOM), a **non-energy** series (I-94 traffic volume,
+  UCI), and two new model families (MLP, degree-2 polynomial ridge). The
+  scaling law replicated **9/9 including out of domain** (slopes 1.21–1.46,
+  chaotic signature rejected everywhere, DOM's scale predicted to **1.4%** by
+  the independent noise estimator); the exponent proved **model-family
+  invariant** (Δs = **0.004** between linear and polynomial, criterion ≤ 0.5);
+  the coverage guarantee held **11/12** — and the single failure is
+  pre-registered, kept, and fully diagnosed: a seasonal block shift that
+  breaks the exchangeability assumption exactly where the theory says the
+  guarantee must break (measured ceiling: no non-trivial constant bound could
+  have covered that season; the instrument's conditional bound tracked the
+  collapse in real time, L_med 4.8 → 1.0).
+  [`docs/theory/multidataset_validation.md`](docs/theory/multidataset_validation.md)
 - **The theory was validated on industrial data it had never seen — 17/17
   pre-registered checks.** On two independent power grids (AEP + PJM-East, the
   latter fetched from the internet during the test), the scaling law derived
@@ -203,6 +218,34 @@ evidence CSV is versioned, the figure re-derives and re-asserts every check
 before it will render, and `tests/test_industrial_evidence.py` pins all of it
 to the test suite. Full derivation and tables:
 [`docs/theory/industrial_validation.md`](docs/theory/industrial_validation.md).
+
+### Campaign v2: more datasets, more model families, one honest failure
+
+<div align="center">
+<img src="assets/multidataset_validation.png" alt="Multi-dataset validation: scaling law on three datasets with model-family-invariant exponent, and 11/12 coverage" width="880"/>
+</div>
+
+A second pre-registered protocol (`studies/study_multidataset_validation.py`,
+26 checks frozen before any run) extended the validation along the two axes
+v1 did not cover. **Left**: the scaling law holds on two new grids *and on
+highway traffic* — a different domain — with the chaotic signature rejected
+everywhere; on COMED the degree-2 polynomial model (open squares) lands on
+the same line as the linear model: **Δs = 0.004**, the exponent belongs to
+the data's innovation-accumulation regime, not to the model family, exactly
+as derived. **Right**: the coverage guarantee held on 11 of 12
+dataset × model calibrations. The 12th — 24-hour persistence on COMED — is a
+**pre-registered FAIL that we keep and publish**: post-hoc diagnosis
+(`studies/diag_comed_naive.py`) measured a seasonal block shift (the naive
+model's median horizon drops from 22 h in calibration to 4 h in the test
+season, 41% of windows failing in the first hour), a regime where **no
+non-trivial constant bound could reach 90% coverage** (measured ceiling
+58.5% at L = 2; the conditional bound reached 0.857 by collapsing its
+estimate toward L = 1 on the failing windows) — the failure mode the theory
+explicitly declares for exchangeability-breaking drift, while the DOM
+control (same model, no shift) passed at 0.9395. Evidence versioned, figure self-asserting,
+`tests/test_multidataset_evidence.py` pins the 25 passes *and* the failure's
+exact values. Full dossier:
+[`docs/theory/multidataset_validation.md`](docs/theory/multidataset_validation.md).
 
 ## The chaos floor: what R is calibrated against
 
